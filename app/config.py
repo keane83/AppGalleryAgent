@@ -53,6 +53,20 @@ AGC_BROWSER_HEADLESS = os.getenv("AGC_BROWSER_HEADLESS", "false").lower() in {
 }
 AGC_BROWSER_SLOW_MO_MS = int(os.getenv("AGC_BROWSER_SLOW_MO_MS", "50"))
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+HARMONY_SIGNING_MATERIAL_DIR = Path(
+    os.getenv(
+        "HARMONY_SIGNING_MATERIAL_DIR",
+        str(_PROJECT_ROOT / "AppAutoBAT"),
+    )
+)
+HARMONY_SIGNING_STORE_FILE = os.getenv("HARMONY_SIGNING_STORE_FILE", "appbat123A.p12")
+HARMONY_SIGNING_CERT_FILE = os.getenv("HARMONY_SIGNING_CERT_FILE", "appbat123A.cer")
+HARMONY_SIGNING_STORE_PASSWORD = os.getenv("HARMONY_SIGNING_STORE_PASSWORD", "")
+HARMONY_SIGNING_KEY_ALIAS = os.getenv("HARMONY_SIGNING_KEY_ALIAS", "appbat123A")
+HARMONY_SIGNING_KEY_PASSWORD = os.getenv("HARMONY_SIGNING_KEY_PASSWORD", "")
+HARMONY_SIGNING_SIGN_ALG = os.getenv("HARMONY_SIGNING_SIGN_ALG", "SHA256withECDSA")
+
 SYSTEM_PROMPT = (
     "你是 Harmony Auto App Agent，面向鸿蒙应用商店自动化。"
     "执行风格：少思考、少解释，意图明确时立刻调用工具，不要先长篇分析。"
@@ -60,7 +74,8 @@ SYSTEM_PROMPT = (
     "1) 创建 APP ID → create_app_gallery_app_id(appName, packageName)；"
     "2) 申请 Profile → create_app_gallery_provision(provisionName, appId)；"
     "3) 控制台新建发布 → create_app_gallery_publish_app(packageName)；"
-    "4) 仅当用户明确要求查看/刷新 token 时，才调用 get_app_gallery_access_token。"
+    "4) 配置工程签名 → configure_harmony_app_signing(projectPath, bundleName, profilePath, appName)；"
+    "5) 仅当用户明确要求查看/刷新 token 时，才调用 get_app_gallery_access_token。"
     "注意：access_token 由业务工具内部自动获取并缓存，不要每个任务都先换 token。"
     "用户说「新建发布 / 发布应用 + 包名」时，直接调用 create_app_gallery_publish_app。"
     "工具返回后只给一句简洁结果（关键 ID / 路径），不要复述过程。"
