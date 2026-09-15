@@ -5,6 +5,7 @@ from app.tools.app_gallery_create_appid import create_app_gallery_app_id
 from app.tools.app_gallery_create_provision import create_app_gallery_provision
 from app.tools.app_gallery_create_publish_app import create_app_gallery_publish_app
 from app.tools.basic import calculator, get_current_time
+from app.tools.harmony_capture_screenshots import capture_harmony_app_screenshots
 from app.tools.harmony_configure_signing import configure_harmony_app_signing
 
 TOOLS = [
@@ -15,6 +16,7 @@ TOOLS = [
     create_app_gallery_provision,
     create_app_gallery_publish_app,
     configure_harmony_app_signing,
+    capture_harmony_app_screenshots,
 ]
 
 __all__ = [
@@ -23,6 +25,7 @@ __all__ = [
     "create_app_gallery_app_id",
     "create_app_gallery_provision",
     "create_app_gallery_publish_app",
+    "capture_harmony_app_screenshots",
     "configure_harmony_app_signing",
     "get_app_gallery_access_token",
     "get_current_time",

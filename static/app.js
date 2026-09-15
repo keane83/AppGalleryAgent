@@ -4,6 +4,24 @@ const inputEl = document.getElementById("message-input");
 const sendBtn = document.getElementById("send-btn");
 const statusEl = document.getElementById("status");
 const statusTextEl = document.getElementById("status-text");
+const MAX_INPUT_LINES = 10;
+
+function resizeInput() {
+  inputEl.style.height = "auto";
+  const style = window.getComputedStyle(inputEl);
+  const lineHeight = parseFloat(style.lineHeight) || 22;
+  const paddingY =
+    parseFloat(style.paddingTop) +
+    parseFloat(style.paddingBottom) +
+    parseFloat(style.borderTopWidth) +
+    parseFloat(style.borderBottomWidth);
+  const minHeight = parseFloat(style.minHeight) || 48;
+  const maxHeight = lineHeight * MAX_INPUT_LINES + paddingY;
+  const nextHeight = Math.min(Math.max(inputEl.scrollHeight, minHeight), maxHeight);
+
+  inputEl.style.height = `${nextHeight}px`;
+  inputEl.style.overflowY = inputEl.scrollHeight > maxHeight ? "auto" : "hidden";
+}
 
 /** @type {{role: "user" | "assistant", content: string}[]} */
 const messages = [];
@@ -195,8 +213,11 @@ formEl.addEventListener("submit", async (event) => {
   const text = inputEl.value.trim();
   if (!text) return;
   inputEl.value = "";
+  resizeInput();
   await sendMessage(text);
 });
+
+inputEl.addEventListener("input", resizeInput);
 
 // 中文输入法：用 Enter 选词时不应发送。部分浏览器在 compositionend 后
 // 仍会再冒泡一次 Enter，且此时 isComposing 已是 false，需要额外拦截。
@@ -211,6 +232,7 @@ inputEl.addEventListener("compositionend", () => {
   isComposing = false;
   // 给确认候选字后的那次 Enter 一点缓冲
   ignoreEnterUntil = Date.now() + 300;
+  resizeInput();
 });
 
 inputEl.addEventListener("keydown", (event) => {
@@ -235,6 +257,7 @@ inputEl.addEventListener("keydown", (event) => {
   formEl.requestSubmit();
 });
 
+resizeInput();
 checkHealth();
 setInterval(checkHealth, 15000);
 

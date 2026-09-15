@@ -66,6 +66,18 @@ HARMONY_SIGNING_STORE_PASSWORD = os.getenv("HARMONY_SIGNING_STORE_PASSWORD", "")
 HARMONY_SIGNING_KEY_ALIAS = os.getenv("HARMONY_SIGNING_KEY_ALIAS", "appbat123A")
 HARMONY_SIGNING_KEY_PASSWORD = os.getenv("HARMONY_SIGNING_KEY_PASSWORD", "")
 HARMONY_SIGNING_SIGN_ALG = os.getenv("HARMONY_SIGNING_SIGN_ALG", "SHA256withECDSA")
+HARMONY_SCREENSHOT_DIR = Path(
+    os.getenv(
+        "HARMONY_SCREENSHOT_DIR",
+        str(_PROJECT_ROOT / "downloads" / "screenshots"),
+    )
+)
+DEVECO_STUDIO_PATH = os.getenv(
+    "DEVECO_STUDIO_PATH",
+    "/Applications/DevEco-Studio.app/Contents",
+)
+HARMONY_HDC_PATH = os.getenv("HARMONY_HDC_PATH", "")
+HARMONY_EMULATOR_NAME = os.getenv("HARMONY_EMULATOR_NAME", "Mate 70 Pro")
 
 SYSTEM_PROMPT = (
     "你是 Harmony Auto App Agent，面向鸿蒙应用商店自动化。"
@@ -75,7 +87,8 @@ SYSTEM_PROMPT = (
     "2) 申请 Profile → create_app_gallery_provision(provisionName, appId)；"
     "3) 控制台新建发布 → create_app_gallery_publish_app(packageName)；"
     "4) 配置工程签名 → configure_harmony_app_signing(projectPath, bundleName, profilePath, appName)；"
-    "5) 仅当用户明确要求查看/刷新 token 时，才调用 get_app_gallery_access_token。"
+    "5) 模拟器应用截图 → capture_harmony_app_screenshots(projectPath)（自动识别原生/WebView/Flutter；Flutter/WebView 可 LLM 分析代码规划 Tab；Flutter 推荐传 ohos 目录）；"
+    "6) 仅当用户明确要求查看/刷新 token 时，才调用 get_app_gallery_access_token。"
     "注意：access_token 由业务工具内部自动获取并缓存，不要每个任务都先换 token。"
     "用户说「新建发布 / 发布应用 + 包名」时，直接调用 create_app_gallery_publish_app。"
     "工具返回后只给一句简洁结果（关键 ID / 路径），不要复述过程。"

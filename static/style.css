@@ -177,13 +177,15 @@ body {
   flex: 1;
   resize: none;
   min-height: 48px;
-  max-height: 160px;
   padding: 12px 14px;
   border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--text);
   font: inherit;
+  line-height: 1.5;
+  overflow-y: hidden;
+  transition: height 0.12s ease;
 }
 
 #message-input:focus {
