@@ -132,10 +132,17 @@ def _heuristic_plan(ohos_root: Path, *, count: int = 3) -> dict[str, object]:
     }
 
 
-def plan_webview_screenshots(ohos_root: Path, *, count: int = 3) -> dict[str, object]:
-    heuristic = _heuristic_plan(ohos_root, count=count)
+def _needs_llm(heuristic: dict[str, object], *, count: int = 3) -> bool:
     shots = heuristic.get("screenshots") or []
     unique_slugs = {s.get("slug") for s in shots if isinstance(s, dict)}
+    return len(unique_slugs) < min(2, count) or len(shots) < count
+
+
+def plan_webview_screenshots(ohos_root: Path, *, count: int = 3) -> dict[str, object]:
+    heuristic = _heuristic_plan(ohos_root, count=count)
+
+    if not _needs_llm(heuristic, count=count):
+        return heuristic
 
     llm_plan = plan_webview_with_llm(
         ohos_root,
@@ -143,11 +150,7 @@ def plan_webview_screenshots(ohos_root: Path, *, count: int = 3) -> dict[str, ob
         find_index_ets(ohos_root),
         count=count,
     )
-
-    use_llm = llm_plan is not None and (
-        len(unique_slugs) < min(2, count) or len(shots) < count
-    )
-    if llm_plan and (use_llm or llm_plan.get("planSource") == "llm"):
+    if llm_plan:
         return llm_plan
 
     return heuristic

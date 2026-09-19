@@ -18,37 +18,70 @@ def _find_dart_root(flutter_root: Path | None, ohos_root: Path) -> Path:
     raise FileNotFoundError("未找到 Flutter pubspec.yaml")
 
 
-def _parse_nav_labels(flutter_root: Path) -> list[str]:
-    labels: list[str] = []
-    lib_dir = flutter_root / "lib"
-    if not lib_dir.is_dir():
-        return labels
+def _labels_from_dart_text(text: str) -> list[str]:
+    items_block = re.search(r"items:\s*const\s*\[(.*?)\]\s*,", text, re.S)
+    if items_block and "BottomNavigationBarItem" in text:
+        found = re.findall(r"label:\s*['\"]([^'\"]+)['\"]", items_block.group(1))
+        if found:
+            return found
 
-    for dart_file in lib_dir.rglob("*.dart"):
-        text = dart_file.read_text(encoding="utf-8", errors="ignore")
+    nav_items = re.findall(
+        r"_NavItem\s*\([\s\S]*?label:\s*['\"]([^'\"]+)['\"]",
+        text,
+    )
+    if nav_items:
+        return nav_items
 
-        items_block = re.search(r"items:\s*const\s*\[(.*?)\]\s*,", text, re.S)
-        if items_block and "BottomNavigationBarItem" in text:
-            found = re.findall(r"label:\s*['\"]([^'\"]+)['\"]", items_block.group(1))
-            if found:
-                return found
+    floating_items = re.findall(
+        r"FloatingTabItem\s*\([\s\S]*?label:\s*['\"]([^'\"]+)['\"]",
+        text,
+    )
+    if floating_items:
+        return floating_items
 
-        nav_items = re.findall(
-            r"_NavItem\s*\(\s*label:\s*['\"]([^'\"]+)['\"]",
+    if "BottomNavigationBarItem" in text:
+        found = re.findall(
+            r"BottomNavigationBarItem[\s\S]*?label:\s*['\"]([^'\"]+)['\"]",
             text,
         )
-        if nav_items:
-            return nav_items
+        if found:
+            return found
+    return []
 
-        if "BottomNavigationBarItem" in text:
-            found = re.findall(
-                r"BottomNavigationBarItem[\s\S]*?label:\s*['\"]([^'\"]+)['\"]",
-                text,
-            )
-            if found:
-                return found
 
-    return labels
+def _parse_nav_labels(flutter_root: Path) -> list[str]:
+    lib_dir = flutter_root / "lib"
+    if not lib_dir.is_dir():
+        return []
+
+    candidates: list[Path] = []
+    for pattern in (
+        "**/*shell*.dart",
+        "**/*root*.dart",
+        "**/*nav*.dart",
+        "**/root_page.dart",
+        "**/app_shell.dart",
+    ):
+        for path in lib_dir.glob(pattern):
+            if path.is_file() and path not in candidates:
+                candidates.append(path)
+
+    for dart_file in candidates:
+        labels = _labels_from_dart_text(dart_file.read_text(encoding="utf-8", errors="ignore"))
+        if labels:
+            return labels
+
+    for dart_file in lib_dir.rglob("*.dart"):
+        if dart_file in candidates:
+            continue
+        text = dart_file.read_text(encoding="utf-8", errors="ignore")
+        if not any(k in text for k in ("BottomNavigationBar", "_NavItem", "bottomNavigationBar")):
+            continue
+        labels = _labels_from_dart_text(text)
+        if labels:
+            return labels
+
+    return []
 
 
 def _infer_tab_count(flutter_root: Path, labels: list[str]) -> int:
@@ -144,8 +177,11 @@ def plan_flutter_screenshots(
     dart_root = _find_dart_root(flutter_root, ohos_root)
     heuristic = _heuristic_plan(dart_root, count=count)
 
+    if not _needs_llm(heuristic):
+        return heuristic
+
     llm_plan = plan_flutter_with_llm(dart_root, count=count)
-    if llm_plan and (_needs_llm(heuristic) or llm_plan.get("planSource") == "llm"):
+    if llm_plan:
         if not llm_plan.get("patchTargetFile"):
             llm_plan["patchTargetFile"] = heuristic.get("patchTargetFile", "")
         return llm_plan

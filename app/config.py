@@ -23,6 +23,18 @@ APP_GALLERY_API_BASE_URL = os.getenv(
     "APP_GALLERY_API_BASE_URL",
     "https://connect-api.cloud.huawei.com/api",
 )
+APP_GALLERY_DEFAULT_CONTACT_NAME = os.getenv("APP_GALLERY_DEFAULT_CONTACT_NAME", "刘健")
+APP_GALLERY_DEFAULT_CONTACT_PHONE = os.getenv("APP_GALLERY_DEFAULT_CONTACT_PHONE", "15509840527")
+APP_GALLERY_DEFAULT_CONTACT_EMAIL = os.getenv(
+    "APP_GALLERY_DEFAULT_CONTACT_EMAIL",
+    "liujian830527@126.com",
+)
+APP_GALLERY_DEFAULT_COLLECT_PERSON_INFO = int(
+    os.getenv("APP_GALLERY_DEFAULT_COLLECT_PERSON_INFO", "0")
+)
+APP_GALLERY_DEFAULT_AICG_TYPE = int(os.getenv("APP_GALLERY_DEFAULT_AICG_TYPE", "0"))
+# registeredDclType: 0=国内服务器 1=海外服务器 2=单机 APP
+APP_GALLERY_DEFAULT_APP_TYPE = int(os.getenv("APP_GALLERY_DEFAULT_APP_TYPE", "2"))
 PROVISION_DOWNLOAD_DIR = Path(
     os.getenv(
         "PROVISION_DOWNLOAD_DIR",
@@ -52,6 +64,16 @@ AGC_BROWSER_HEADLESS = os.getenv("AGC_BROWSER_HEADLESS", "false").lower() in {
     "on",
 }
 AGC_BROWSER_SLOW_MO_MS = int(os.getenv("AGC_BROWSER_SLOW_MO_MS", "50"))
+# 可选：持久化 Chromium Profile（比 storage_state 更稳，推荐本地开发开启）
+_agc_profile = os.getenv("AGC_BROWSER_USER_DATA_DIR", "").strip()
+AGC_BROWSER_USER_DATA_DIR = (
+    Path(_agc_profile).expanduser()
+    if _agc_profile
+    else Path(__file__).resolve().parent.parent / "downloads" / "agc_chrome_profile"
+    if os.getenv("AGC_BROWSER_USE_PERSISTENT_PROFILE", "false").lower()
+    in {"1", "true", "yes", "on"}
+    else None
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 HARMONY_SIGNING_MATERIAL_DIR = Path(
@@ -86,9 +108,13 @@ SYSTEM_PROMPT = (
     "1) 创建 APP ID → create_app_gallery_app_id(appName, packageName)；"
     "2) 申请 Profile → create_app_gallery_provision(provisionName, appId)；"
     "3) 控制台新建发布 → create_app_gallery_publish_app(packageName)；"
+    "3b) 控制台配置隐私协议 → configure_app_gallery_privacy_agreement(appName)；同名多应用时可传 packageName；"
     "4) 配置工程签名 → configure_harmony_app_signing(projectPath, bundleName, profilePath, appName)；"
-    "5) 模拟器应用截图 → capture_harmony_app_screenshots(projectPath)（自动识别原生/WebView/Flutter；Flutter/WebView 可 LLM 分析代码规划 Tab；Flutter 推荐传 ohos 目录）；"
-    "6) 仅当用户明确要求查看/刷新 token 时，才调用 get_app_gallery_access_token。"
+    "5) 获取截图+1024图标 → capture_harmony_screenshots_and_app_icon(projectPath)（输出 3 张截图 + app_icon_1024.png；推荐传 ohos 目录）；"
+    "6) 上传图标+截图到 AGC → update_app_gallery_app_file_info(appId, appIconPath=输出目录/app_icon_1024.png, screenshotDir=输出目录)；"
+    "7) 分析工程并更新 AGC 基本信息 → update_app_gallery_app_basic_info(appId, projectPath)；返回 summary 含 harmonyChildType/kindMainTag/文案；previewOnly=true 仅预览；"
+    "8) 编译并上传 .app 软件包 → update_app_gallery_build_update_app(projectPath, appId)；"
+    "9) 仅当用户明确要求查看/刷新 token 时，才调用 get_app_gallery_access_token。"
     "注意：access_token 由业务工具内部自动获取并缓存，不要每个任务都先换 token。"
     "用户说「新建发布 / 发布应用 + 包名」时，直接调用 create_app_gallery_publish_app。"
     "工具返回后只给一句简洁结果（关键 ID / 路径），不要复述过程。"

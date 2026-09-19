@@ -16,7 +16,7 @@ from app.config import (
     APP_GALLERY_API_CERT_ID,
     PROVISION_DOWNLOAD_DIR,
 )
-from app.tools.app_gallery_auth import build_api_client_headers, fetch_access_token
+from app.tools.app_gallery_auth import build_api_client_headers, resolve_api_auth
 
 # 文档：https://developer.huawei.com/consumer/cn/doc/app/agc-help-provision-api-apply-provision-0000002271000689
 # 接口：POST /publish/v3/provision
@@ -88,13 +88,7 @@ def apply_provision(
     if not cid:
         raise ValueError("缺少 APP_GALLERY_API_CERT_ID，请在 .env 中配置")
 
-    if access_token:
-        token = access_token.strip()
-        client_id = None
-    else:
-        token_info = fetch_access_token()
-        token = str(token_info["access_token"])
-        client_id = str(token_info["client_id"])
+    token, client_id = resolve_api_auth(access_token)
 
     url = f"{APP_GALLERY_API_BASE_URL.rstrip('/')}{APPLY_PROVISION_PATH}"
     headers = build_api_client_headers(token, client_id)

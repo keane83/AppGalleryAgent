@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Any
+from contextvars import ContextVar
+from typing import Any, Mapping
 
 import httpx
 from langchain_core.tools import tool
@@ -21,14 +22,83 @@ TOKEN_URL = APP_GALLERY_API_TOKEN_URL
 # 提前刷新缓冲，避免临界过期
 _TOKEN_REFRESH_SKEW_SECONDS = 120
 
+# 进程级缓存（跨请求复用，线程安全）
 _cache_lock = threading.Lock()
 _token_cache: dict[str, Any] | None = None
+
+# 单次 Agent 会话缓存（同一 request / stream 内复用）
+_session_auth_ctx: ContextVar[dict[str, Any] | None] = ContextVar(
+    "app_gallery_session_auth",
+    default=None,
+)
+
+# 调用 Connect API 时需要 Authorization + client_id 的工具
+APP_GALLERY_API_TOOL_NAMES = frozenset(
+    {
+        "get_app_gallery_access_token",
+        "create_app_gallery_app_id",
+        "create_app_gallery_provision",
+        "update_app_gallery_app_file_info",
+        "update_app_gallery_app_basic_info",
+        "update_app_gallery_build_update_app",
+    }
+)
+
+
+def tool_needs_app_gallery_auth(tool_name: str | None) -> bool:
+    return bool(tool_name and tool_name in APP_GALLERY_API_TOOL_NAMES)
+
+
+def begin_session_auth() -> None:
+    """新 Agent 会话开始时清空会话级 token。"""
+    _session_auth_ctx.set(None)
+
+
+def get_session_auth() -> dict[str, Any] | None:
+    return _session_auth_ctx.get()
+
+
+def set_session_auth(auth: dict[str, Any]) -> None:
+    _session_auth_ctx.set(dict(auth))
 
 
 def clear_access_token_cache() -> None:
     global _token_cache
     with _cache_lock:
         _token_cache = None
+
+
+def _auth_valid(auth: Mapping[str, Any] | None) -> bool:
+    if not auth:
+        return False
+    token = str(auth.get("access_token") or "").strip()
+    client_id = str(auth.get("client_id") or "").strip()
+    expires_at = float(auth.get("expires_at") or 0)
+    return bool(token and client_id and time.time() < expires_at)
+
+
+def auth_from_state(state: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """从 Agent state 读取有效鉴权信息。"""
+    if not state:
+        return None
+    token = str(state.get("app_gallery_access_token") or "").strip()
+    client_id = str(state.get("app_gallery_client_id") or "").strip()
+    expires_at = float(state.get("app_gallery_token_expires_at") or 0)
+    auth = {
+        "access_token": token,
+        "client_id": client_id,
+        "expires_at": expires_at,
+    }
+    return auth if _auth_valid(auth) else None
+
+
+def auth_state_patch(auth: Mapping[str, Any]) -> dict[str, Any]:
+    """将鉴权信息写回 Agent state 的 patch。"""
+    return {
+        "app_gallery_access_token": str(auth.get("access_token") or ""),
+        "app_gallery_client_id": str(auth.get("client_id") or ""),
+        "app_gallery_token_expires_at": float(auth.get("expires_at") or 0),
+    }
 
 
 def _cache_valid(cid: str) -> bool:
@@ -49,7 +119,6 @@ def fetch_access_token(
 ) -> dict[str, Any]:
     """调用华为 Connect API 换取 access_token（带进程内缓存）。
 
-    同一次 Agent 服务生命周期内会复用未过期的 token，避免每个工具都重新换票。
     文档：https://developer.huawei.com/consumer/cn/doc/app/agc-help-connect-api-obtain-server-auth-0000002271134661
     """
     global _token_cache
@@ -111,6 +180,43 @@ def fetch_access_token(
     return result
 
 
+def ensure_app_gallery_auth(
+    state: Mapping[str, Any] | None = None,
+    *,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """确保当前会话有可用 access_token，并写入会话 context。
+
+    优先级：Agent state → 会话 context → 进程缓存/远程换票。
+    """
+    if not force_refresh:
+        state_auth = auth_from_state(state)
+        if state_auth:
+            set_session_auth(state_auth)
+            return state_auth
+
+        session_auth = get_session_auth()
+        if _auth_valid(session_auth):
+            return dict(session_auth)
+
+    auth = fetch_access_token(force_refresh=force_refresh)
+    set_session_auth(auth)
+    return auth
+
+
+def resolve_api_auth(access_token: str | None = None) -> tuple[str, str | None]:
+    """解析 API 客户端鉴权：返回 (access_token, client_id|None)。"""
+    if access_token:
+        return access_token.strip(), None
+
+    session_auth = get_session_auth()
+    if _auth_valid(session_auth):
+        return str(session_auth["access_token"]), str(session_auth["client_id"])
+
+    auth = ensure_app_gallery_auth()
+    return str(auth["access_token"]), str(auth["client_id"])
+
+
 def build_api_client_headers(access_token: str, client_id: str | None = None) -> dict[str, str]:
     """API 客户端方式调用 Connect API 时的公共请求头。"""
     cid = (client_id or APP_GALLERY_API_CLIENT_ID or "").strip()
@@ -154,7 +260,7 @@ def get_app_gallery_access_token() -> str:
     仅当用户明确要求查看/刷新 token，或鉴权失败需要强制换票时再调用。
     """
     try:
-        result = fetch_access_token()
+        result = ensure_app_gallery_auth()
     except Exception as exc:
         return f"获取 AppGallery access_token 失败: {exc}"
 

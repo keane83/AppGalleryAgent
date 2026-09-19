@@ -425,3 +425,113 @@ def build_entry_hap(project_root: Path | str) -> Path:
         tail = (proc.stdout + proc.stderr)[-4000:]
         raise RuntimeError(f"assembleHap 失败 (code={proc.returncode}):\n{tail}")
     raise FileNotFoundError("未找到 entry-default-signed.hap 或 unsigned hap")
+
+
+def find_app_package(root: Path | str) -> Path:
+    """在工程目录下查找最新构建的 .app 包（优先 signed）。"""
+    project_root = Path(root).expanduser().resolve()
+    candidates = [p for p in project_root.glob("**/*.app") if p.is_file()]
+    if not candidates:
+        raise FileNotFoundError(f"未找到 .app 软件包：{project_root}")
+
+    signed = [p for p in candidates if "signed" in p.name.lower()]
+    pool = signed or candidates
+    return max(pool, key=lambda p: p.stat().st_mtime)
+
+
+def build_entry_app(project_root: Path | str, *, release: bool = True) -> Path:
+    """hvigor assembleApp 编译 HarmonyOS .app 包（用于 AppGallery 上传）。"""
+    project_root = Path(project_root).expanduser().resolve()
+    env = _reload_harmony_env()
+    hvigorw = Path(env["hvigorw"])
+    if not hvigorw.is_file():
+        raise FileNotFoundError(f"hvigorw 未找到：{hvigorw}")
+
+    cmd = [
+        str(hvigorw),
+        "assembleApp",
+        "-p",
+        "product=default",
+    ]
+    if release:
+        cmd.extend(["-p", "buildMode=release"])
+
+    logger.info("开始编译 HarmonyOS APP 包（assembleApp, release=%s）…", release)
+    started = time.time()
+    proc = subprocess.run(
+        cmd,
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+    )
+    logger.info("assembleApp 完成，耗时 %.0fs", time.time() - started)
+
+    preferred = [
+        project_root / "build/outputs/default/default-default-signed.app",
+        project_root / "build/outputs/default/default-default-unsigned.app",
+        project_root / "build/default/outputs/default/default-default-signed.app",
+    ]
+    for path in preferred:
+        if path.is_file():
+            return path
+
+    try:
+        return find_app_package(project_root)
+    except FileNotFoundError:
+        if proc.returncode != 0:
+            tail = (proc.stdout + proc.stderr)[-4000:]
+            raise RuntimeError(f"assembleApp 失败 (code={proc.returncode}):\n{tail}") from None
+        raise
+
+
+def build_flutter_app(
+    flutter_root: Path,
+    *,
+    release: bool = True,
+) -> Path:
+    """flutter build app 编译 Flutter OHOS .app 包。"""
+    load_dotenv(_PROJECT_ROOT / ".env", override=True)
+    flutter_bin = os.getenv("FLUTTER_BIN", shutil.which("flutter") or "flutter")
+    flutter_root = flutter_root.expanduser().resolve()
+    if not (flutter_root / "pubspec.yaml").is_file():
+        raise FileNotFoundError(f"Flutter 工程不存在：{flutter_root}")
+
+    cmd = [flutter_bin, "build", "app"]
+    if release:
+        cmd.append("--release")
+
+    logger.info("开始编译 Flutter APP 包（flutter build app）…")
+    started = time.time()
+    proc = subprocess.run(
+        cmd,
+        cwd=str(flutter_root),
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+    )
+    logger.info("Flutter APP 编译完成，耗时 %.0fs", time.time() - started)
+    if proc.returncode != 0:
+        tail = (proc.stdout + proc.stderr)[-5000:]
+        raise RuntimeError(f"flutter build app 失败 (code={proc.returncode}):\n{tail}")
+
+    ohos_root = flutter_root / "ohos"
+    candidates = [
+        flutter_root / "build/ohos/app/entry-default-signed.app",
+        flutter_root / "build/ohos/app/entry-default-unsigned.app",
+        ohos_root / "build/outputs/default/default-default-signed.app",
+        ohos_root / "build/outputs/default/default-default-unsigned.app",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+
+    search_roots = [flutter_root, ohos_root] if ohos_root.is_dir() else [flutter_root]
+    for root in search_roots:
+        try:
+            return find_app_package(root)
+        except FileNotFoundError:
+            continue
+    raise FileNotFoundError("flutter build app 后未找到 .app 软件包")

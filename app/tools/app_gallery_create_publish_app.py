@@ -173,9 +173,9 @@ def create_publish_app_by_package_name(package_name: str) -> dict[str, Any]:
 
     screenshot_before = ""
     screenshot_after = ""
-    with launch_agc_context(headless=False) as (_pw, _browser, _context, page):
+    with launch_agc_context(headless=False) as (_pw, _browser, context, page):
         try:
-            open_myapp_page(page)
+            open_myapp_page(page, context)
             _dismiss_blocking_tips(page)
             # 确保在 HarmonyOS 页签
             try:

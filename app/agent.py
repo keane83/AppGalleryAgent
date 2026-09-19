@@ -2,9 +2,10 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
-from langgraph.graph import END, MessagesState, START, StateGraph
+from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from app.agent_state import AgentState
 from app.config import (
     OLLAMA_BASE_URL,
     OLLAMA_KEEP_ALIVE,
@@ -16,6 +17,13 @@ from app.config import (
 from app.logging_config import begin_request, finish_request, log_event
 from app.thinking import collect_agent_output, extract_message_parts
 from app.tools import TOOLS, safe_tool_log_content
+from app.tools.app_gallery_auth import (
+    auth_from_state,
+    auth_state_patch,
+    begin_session_auth,
+    ensure_app_gallery_auth,
+    tool_needs_app_gallery_auth,
+)
 
 TOOLS_NODE = ToolNode(TOOLS)
 
@@ -77,7 +85,22 @@ def _request_id(config) -> str:
     return configurable.get("request_id", "-")
 
 
-def _call_model(state: MessagesState, config) -> dict[str, list[BaseMessage]]:
+def _pending_tool_names(state: AgentState) -> list[str]:
+    last_message = state["messages"][-1]
+    if isinstance(last_message, AIMessage) and last_message.tool_calls:
+        return [str(call["name"]) for call in last_message.tool_calls]
+    return []
+
+
+def _prepare_app_gallery_auth(state: AgentState) -> dict[str, Any]:
+    pending = _pending_tool_names(state)
+    if not any(tool_needs_app_gallery_auth(name) for name in pending):
+        return {}
+    auth = ensure_app_gallery_auth(state)
+    return auth_state_patch(auth)
+
+
+def _call_model(state: AgentState, config) -> dict[str, list[BaseMessage]]:
     global _llm_call_count
     _llm_call_count += 1
     call_no = _llm_call_count
@@ -124,7 +147,7 @@ def _call_model(state: MessagesState, config) -> dict[str, list[BaseMessage]]:
     return {"messages": [response]}
 
 
-def _call_tools(state: MessagesState, config) -> dict[str, list[BaseMessage]]:
+def _call_tools(state: AgentState, config) -> dict[str, Any]:
     request_id = _request_id(config)
     last_message = state["messages"][-1]
     if isinstance(last_message, AIMessage) and last_message.tool_calls:
@@ -135,6 +158,16 @@ def _call_tools(state: MessagesState, config) -> dict[str, list[BaseMessage]]:
                 tool=tool_call["name"],
                 args=tool_call.get("args"),
             )
+
+    had_auth = bool(auth_from_state(state))
+    auth_patch = _prepare_app_gallery_auth(state)
+    if auth_patch:
+        log_event(
+            request_id,
+            "AppGallery 鉴权已就绪",
+            client_id=auth_patch.get("app_gallery_client_id"),
+            reused_session_auth=had_auth,
+        )
 
     result = TOOLS_NODE.invoke(state)
 
@@ -147,10 +180,12 @@ def _call_tools(state: MessagesState, config) -> dict[str, list[BaseMessage]]:
                 content=safe_tool_log_content(message.name, message.content),
             )
 
+    if auth_patch:
+        result.update(auth_patch)
     return result
 
 
-def _route_after_agent(state: MessagesState, config):
+def _route_after_agent(state: AgentState, config):
     request_id = _request_id(config)
     route = tools_condition(state)
     destination = "tools" if route == "tools" else "END"
@@ -159,7 +194,7 @@ def _route_after_agent(state: MessagesState, config):
 
 
 def build_agent():
-    graph = StateGraph(MessagesState)
+    graph = StateGraph(AgentState)
     graph.add_node("agent", _call_model)
     graph.add_node("tools", _call_tools)
     graph.add_edge(START, "agent")
@@ -198,6 +233,7 @@ def _invoke_agent(raw_messages: list[dict[str, str]], mode: str) -> tuple[dict[s
 
     user_message = _latest_user_message(raw_messages)
     request_id = begin_request(mode=mode, user_message=user_message)
+    begin_session_auth()
     log_event(
         request_id,
         "LangGraph 开始执行",
@@ -226,7 +262,9 @@ def stream_agent(raw_messages: list[dict[str, str]]):
 
     user_message = _latest_user_message(raw_messages)
     request_id = begin_request(mode="stream", user_message=user_message)
+    begin_session_auth()
     messages = to_langchain_messages(raw_messages)
+    session_auth_state: dict[str, Any] = {}
     log_event(
         request_id,
         "LangGraph 流式执行",
@@ -303,6 +341,14 @@ def stream_agent(raw_messages: list[dict[str, str]]):
                         tool=tool_name,
                         args=tool_args,
                     )
+                    if tool_needs_app_gallery_auth(tool_name):
+                        auth = ensure_app_gallery_auth(session_auth_state)
+                        session_auth_state.update(auth_state_patch(auth))
+                        log_event(
+                            request_id,
+                            "AppGallery 鉴权已就绪",
+                            client_id=session_auth_state.get("app_gallery_client_id"),
+                        )
                     tool_result = tools_by_name[tool_name].invoke(tool_args)
                     log_event(
                         request_id,

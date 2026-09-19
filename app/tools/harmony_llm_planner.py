@@ -22,7 +22,7 @@ MAX_TOTAL_CHARS = 48000
 
 def _llm_enabled() -> bool:
     load_dotenv(_PROJECT_ROOT / ".env", override=True)
-    return os.getenv("HARMONY_LLM_PLANNER", "true").lower() in {"1", "true", "yes", "on"}
+    return os.getenv("HARMONY_LLM_PLANNER", "false").lower() in {"1", "true", "yes", "on"}
 
 
 def _read_excerpt(path: Path, limit: int = MAX_FILE_CHARS) -> str:
@@ -75,6 +75,11 @@ def collect_webview_context(ohos_root: Path, html_path: Path, index_ets: Path) -
     )
 
 
+def request_ollama_json(system: str, user: str) -> dict[str, Any]:
+    """调用本地 Ollama 并解析 JSON 响应。"""
+    return _ollama_json(system, user)
+
+
 def _ollama_json(system: str, user: str) -> dict[str, Any]:
     payload = {
         "model": OLLAMA_MODEL,
@@ -109,8 +114,8 @@ def plan_flutter_with_llm(flutter_root: Path, *, count: int = 3) -> dict[str, An
     system = (
         "你是 HarmonyOS Flutter 应用商店截图规划器。"
         "根据 Dart 源码分析 Tab/页面结构，输出严格 JSON（不要 markdown）。"
-        "Flutter OHOS 只有单页宿主，截图需通过 HARMONY_AUTO_TAB dart-define 指定 Tab 索引。"
-        "patchTargetFile 必须是含 int _index  Tab 状态字段的 StatefulWidget 文件（相对 Flutter 根目录）。"
+        "Flutter OHOS 通过冷启动 Want 参数 harmonyAutoTab 运行时切 Tab。"
+        "patchTargetFile 必须是含 int _index Tab 状态字段的 StatefulWidget 文件（相对 Flutter 根目录）。"
         f"screenshots 数组长度应为 {count}，每项含 tabIndex(0-based)、slug、label、reason。"
     )
     user = (
