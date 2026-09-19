@@ -262,7 +262,48 @@ checkHealth();
 setInterval(checkHealth, 15000);
 
 appendAssistantMessage(
-  "你好！我是 Harmony Auto App Agent，面向鸿蒙应用商店自动化。"
-    + "可以说「帮我获取 AppGallery API token」来换取访问令牌；"
-    + "也可先问我现在几点或帮你算数验证工具调用。"
+  `你好！我是 Harmony Auto App Agent，帮你把鸿蒙应用上架到华为 AppGallery Connect。
+直接说你想做什么，我会自动调用对应工具。
+
+【我能帮你做的事】
+
+· 创建 APP ID — 需要：应用名、包名
+· 申请 Profile（.p7b 签名文件）— 需要：Profile 名称、appId
+· 在控制台「新建发布」— 需要：包名（浏览器操作，需先登录 AGC）
+· 配置工程签名 — 需要：工程路径、包名、Profile 路径、应用名
+· 截取商店截图 + 导出 1024 图标 — 需要：工程路径（建议传 ohos 目录）
+· 上传图标和截图到商店 — 需要：appId、截图/图标所在目录
+· 分析工程并更新商店信息（分类、介绍、简介；隐私标签默认设「否」）— 需要：appId、工程路径
+· 创建并关联隐私协议 — 需要：应用名（同名多个应用时可加包名）
+· 填写年龄分级问卷 — 需要：应用名（同名多个应用时可加包名）
+· 编译 .app 并上传到 AGC — 需要：工程路径、appId
+
+【推荐上架顺序】
+
+创建 APP ID → 申请 Profile → 新建发布 → 配置签名 → 截图/图标 → 上传素材 → 更新基本信息 → 隐私协议 → 年龄分级 → 编译上传
+
+【想一次性全流程？】
+
+你可以这样说：
+「帮我把应用【词汇日积月累】完整上架，包名 com.example.app，工程路径 /path/to/project，按推荐顺序执行。」
+
+我会按顺序逐步完成；某步缺信息时会向你确认。
+
+【浏览器操作前置 · AGC 登录】
+
+新建发布、隐私协议、年龄分级走网页控制台，需先保存华为账号登录态。
+· 第一次使用：必须先做
+· 登录态过期/工具报未登录时：重新做一遍
+
+在终端执行（进入本项目目录后）：
+
+1. source .venv/bin/activate          # 若使用了虚拟环境
+2. playwright install chromium        # 首次需安装浏览器，已装可跳过
+3. python -m app.tools.agc_browser_login
+
+脚本会打开 Chromium → 用华为开发者账号登录 → 看到「APP与元服务 / 新建发布」后自动保存。
+若已登录但未自动保存，回到终端按 Enter 即可。
+
+登录态保存到：downloads/agc_storage_state.json
+与 Agent 网页是否打开无关，登录一次即可复用。`
 );

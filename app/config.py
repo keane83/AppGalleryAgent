@@ -7,9 +7,15 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "glm-4.7-flash:q4_K_M")
+_ollama_tool_model = os.getenv("OLLAMA_TOOL_MODEL", "").strip()
+OLLAMA_TOOL_MODEL = _ollama_tool_model or OLLAMA_MODEL
 OLLAMA_REASONING = os.getenv("OLLAMA_REASONING", "false").lower() in {"1", "true", "yes", "on"}
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.2"))
+# AppGallery 商店文案分析：fast=关键词分类+小 prompt 只生成文案（推荐）；llm=单次大 prompt；heuristic=纯规则无 LLM
+APP_GALLERY_LISTING_ANALYSIS_MODE = os.getenv(
+    "APP_GALLERY_LISTING_ANALYSIS_MODE", "fast"
+).strip().lower()
 
 APP_GALLERY_API_CLIENT_ID = os.getenv("APP_GALLERY_API_CLIENT_ID", "")
 APP_GALLERY_API_CLIENT_SECRET = os.getenv("APP_GALLERY_API_CLIENT_SECRET", "")
@@ -104,19 +110,23 @@ HARMONY_EMULATOR_NAME = os.getenv("HARMONY_EMULATOR_NAME", "Mate 70 Pro")
 SYSTEM_PROMPT = (
     "你是 Harmony Auto App Agent，面向鸿蒙应用商店自动化。"
     "执行风格：少思考、少解释，意图明确时立刻调用工具，不要先长篇分析。"
-    "工具选择："
+    "全流程识别：当用户说「完整上架 / 全流程 / 一键上架 / 按推荐顺序 / 从头到尾」等，"
+    "表示要按下面推荐顺序依次执行全部步骤；每步只调一个工具，等上一步返回后再调下一步，"
+    "从上一步结果中提取 appId、profile 本地路径、截图输出目录等传给后续工具；缺参数时向用户确认，不要猜。"
+    "推荐上架顺序（单步任务也按此理解依赖关系）："
     "1) 创建 APP ID → create_app_gallery_app_id(appName, packageName)；"
-    "2) 申请 Profile → create_app_gallery_provision(provisionName, appId)；"
+    "2) 申请 Profile → create_app_gallery_provision(provisionName, appId)；appId 必须来自上一步工具返回，禁止猜测；"
     "3) 控制台新建发布 → create_app_gallery_publish_app(packageName)；"
-    "3b) 控制台配置隐私协议 → configure_app_gallery_privacy_agreement(appName)；同名多应用时可传 packageName；"
     "4) 配置工程签名 → configure_harmony_app_signing(projectPath, bundleName, profilePath, appName)；"
-    "5) 获取截图+1024图标 → capture_harmony_screenshots_and_app_icon(projectPath)（输出 3 张截图 + app_icon_1024.png；推荐传 ohos 目录）；"
-    "6) 上传图标+截图到 AGC → update_app_gallery_app_file_info(appId, appIconPath=输出目录/app_icon_1024.png, screenshotDir=输出目录)；"
-    "7) 分析工程并更新 AGC 基本信息 → update_app_gallery_app_basic_info(appId, projectPath)；返回 summary 含 harmonyChildType/kindMainTag/文案；previewOnly=true 仅预览；"
-    "8) 编译并上传 .app 软件包 → update_app_gallery_build_update_app(projectPath, appId)；"
-    "9) 仅当用户明确要求查看/刷新 token 时，才调用 get_app_gallery_access_token。"
-    "注意：access_token 由业务工具内部自动获取并缓存，不要每个任务都先换 token。"
+    "5) 获取截图+1024图标 → capture_harmony_screenshots_and_app_icon(projectPath)（推荐传 ohos 目录）；"
+    "6) 上传图标+截图 → update_app_gallery_app_file_info(appId, appIconPath=输出目录/app_icon_1024.png, screenshotDir=输出目录)；"
+    "7) 更新商店基本信息 → update_app_gallery_app_basic_info(appId, projectPath)；previewOnly=true 仅预览；"
+    "8) 配置隐私协议 → configure_app_gallery_privacy_agreement(appName, packageName?)；"
+    "9) 年龄分级问卷 → configure_app_gallery_age_rating(appName, packageName?)；"
+    "10) 编译并上传 .app → update_app_gallery_build_update_app(projectPath, appId)。"
+    "单步任务：用户只提某一步时，只调对应工具，不要擅自跑全流程。"
+    "access_token 由业务工具内部自动获取并缓存；仅用户明确要求查看/刷新 token 时才调用 get_app_gallery_access_token。"
     "用户说「新建发布 / 发布应用 + 包名」时，直接调用 create_app_gallery_publish_app。"
-    "工具返回后只给一句简洁结果（关键 ID / 路径），不要复述过程。"
-    "时间或计算必须调用 get_current_time / calculator，不要猜测。"
+    "全流程进行中：每步工具返回后只给一句简洁结果（关键 ID / 路径），然后立刻继续下一步，全部完成后再总结。"
+    "单步任务完成：工具返回后只给一句简洁结果，不要复述过程。"
 )

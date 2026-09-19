@@ -12,7 +12,14 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
-from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TEMPERATURE, _PROJECT_ROOT
+from app.config import (
+    OLLAMA_BASE_URL,
+    OLLAMA_KEEP_ALIVE,
+    OLLAMA_MODEL,
+    OLLAMA_TEMPERATURE,
+    OLLAMA_TOOL_MODEL,
+    _PROJECT_ROOT,
+)
 
 logger = logging.getLogger("haa.llm_planner")
 
@@ -23,6 +30,17 @@ MAX_TOTAL_CHARS = 48000
 def _llm_enabled() -> bool:
     load_dotenv(_PROJECT_ROOT / ".env", override=True)
     return os.getenv("HARMONY_LLM_PLANNER", "false").lower() in {"1", "true", "yes", "on"}
+
+
+def _webview_llm_auto_enabled() -> bool:
+    """WebView 启发式规划不足时，是否自动用 LLM 分析 HTML（默认开启）。"""
+    load_dotenv(_PROJECT_ROOT / ".env", override=True)
+    return os.getenv("HARMONY_WEBVIEW_LLM_AUTO", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 def _read_excerpt(path: Path, limit: int = MAX_FILE_CHARS) -> str:
@@ -66,32 +84,83 @@ def collect_flutter_context(flutter_root: Path) -> str:
     return "\n".join(parts)
 
 
+def _extract_webview_html_for_llm(html_path: Path, *, limit: int = 28000) -> str:
+    """提取 HTML 中与导航/切页相关的片段，避免纯 CSS 占满上下文。"""
+    text = html_path.read_text(encoding="utf-8", errors="ignore")
+    chunks: list[str] = []
+
+    for pattern in (
+        r"<nav[\s\S]*?</nav>",
+        r'<div[^>]*class="[^"]*bottom-nav[^"]*"[\s\S]*?</div>',
+        r'<button[^>]*data-tab=[^>]*>[\s\S]*?</button>',
+        r"<script[\s\S]*?</script>",
+    ):
+        for match in re.finditer(pattern, text, re.I):
+            chunk = match.group(0).strip()
+            if chunk and chunk not in chunks:
+                chunks.append(chunk)
+
+    if not chunks:
+        return _read_excerpt(html_path, limit)
+
+    merged = "\n\n/* --- extracted nav/script --- */\n\n".join(chunks)
+    if len(merged) <= limit:
+        return merged
+    half = limit // 2
+    return merged[:half] + "\n\n/* ... truncated ... */\n\n" + merged[-half:]
+
+
 def collect_webview_context(ohos_root: Path, html_path: Path, index_ets: Path) -> str:
-    html_text = _read_excerpt(html_path, MAX_FILE_CHARS)
+    html_text = _extract_webview_html_for_llm(html_path)
     index_text = _read_excerpt(index_ets, 4000)
     return (
         f"=== Index.ets ===\n{index_text}\n\n"
-        f"=== {html_path.name} ===\n{html_text}\n"
+        f"=== {html_path.name} (nav/script excerpts) ===\n{html_text}\n"
     )
 
 
-def request_ollama_json(system: str, user: str) -> dict[str, Any]:
+def request_ollama_json(
+    system: str,
+    user: str,
+    *,
+    model: str | None = None,
+    num_predict: int | None = None,
+    timeout: float = 180.0,
+) -> dict[str, Any]:
     """调用本地 Ollama 并解析 JSON 响应。"""
-    return _ollama_json(system, user)
+    return _ollama_json(
+        system,
+        user,
+        model=model,
+        num_predict=num_predict,
+        timeout=timeout,
+    )
 
 
-def _ollama_json(system: str, user: str) -> dict[str, Any]:
-    payload = {
-        "model": OLLAMA_MODEL,
+def _ollama_json(
+    system: str,
+    user: str,
+    *,
+    model: str | None = None,
+    num_predict: int | None = None,
+    timeout: float = 180.0,
+) -> dict[str, Any]:
+    options: dict[str, Any] = {"temperature": min(OLLAMA_TEMPERATURE, 0.3)}
+    if num_predict is not None:
+        options["num_predict"] = num_predict
+
+    payload: dict[str, Any] = {
+        "model": model or OLLAMA_TOOL_MODEL or OLLAMA_MODEL,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         "stream": False,
         "format": "json",
-        "options": {"temperature": min(OLLAMA_TEMPERATURE, 0.3)},
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "options": options,
     }
-    with httpx.Client(timeout=180.0) as client:
+    with httpx.Client(timeout=timeout) as client:
         resp = client.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
         resp.raise_for_status()
         data = resp.json()
@@ -178,26 +247,38 @@ def plan_webview_with_llm(
     index_ets: Path,
     *,
     count: int = 3,
+    auto_fallback: bool = False,
 ) -> dict[str, Any] | None:
-    if not _llm_enabled():
+    if auto_fallback:
+        if not _webview_llm_auto_enabled():
+            return None
+    elif not _llm_enabled():
         return None
+
     context = collect_webview_context(ohos_root, html_path, index_ets)
     system = (
         "你是 HarmonyOS WebView 本地 HTML 应用商店截图规划器。"
-        "WebView 通过 runJavaScript 切页后截图。输出严格 JSON。"
-        "script 必须是可在 WebView 内直接执行的 JS（优先 element.click()，避免依赖闭包内函数）。"
-        "第一个截图若对应默认页，script 可为空字符串，waitSec 建议 9。"
-        f"screenshots 长度应为 {count}。"
+        "根据 HTML/JS 分析应用的主要界面，规划应用商店介绍截图。"
+        "WebView 通过 runJavaScript 执行 script 切页后截图。输出严格 JSON，不要 markdown。"
+        "script 必须是可在 WebView 内直接执行的 JS：优先 querySelector + click()；"
+        "支持 data-tab 导航，例如 document.querySelector('.nav-item[data-tab=\"shops\"]')?.click()；"
+        "避免调用 HTML 内闭包函数（如 switchTab），除非能从 DOM 直接触发。"
+        "第一个截图若已是默认页，script 可为空字符串，waitSec 建议 9。"
+        "选择差异明显、能展示核心功能的 3 个主界面，不要选空白/登录/弹窗。"
+        f"screenshots 数组长度应为 {count}。"
     )
     user = (
         f"OHOS 根目录: {ohos_root}\nHTML: {html_path.name}\n需要 {count} 张不同截图。\n\n"
         f"{context}\n\n"
-        "输出 JSON:\n"
-        '{"screenshots":[{"slug":"create","label":"创建","script":"document.getElementById(\'tabCreate\')?.click();",'
-        '"reason":"...","waitSec":5}]}'
+        "输出 JSON 示例:\n"
+        '{"screenshots":[{"slug":"home","label":"首页","script":"",'
+        '"reason":"默认首页","waitSec":9},'
+        '{"slug":"shops","label":"店铺","script":"document.querySelector(\'.nav-item[data-tab=\\"shops\\"]\')?.click();",'
+        '"reason":"底部导航切到店铺","waitSec":5.5}]}'
     )
     try:
-        raw = _ollama_json(system, user)
+        logger.info("WebView 截图规划：调用 LLM 分析 HTML（auto_fallback=%s）", auto_fallback)
+        raw = _ollama_json(system, user, num_predict=800, timeout=90.0)
     except Exception as exc:
         logger.warning("WebView LLM 规划失败: %s", exc)
         return None

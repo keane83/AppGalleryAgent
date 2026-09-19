@@ -19,6 +19,7 @@ from app.config import (
 )
 from app.tools.agc_browser import (
     click_first_visible,
+    click_version_ready_submit_save,
     click_sidebar_menu_item,
     click_text_in_content_area,
     debug_frames_summary,
@@ -1175,15 +1176,7 @@ def _bind_privacy_policy_in_version(page: Page, app_name: str) -> None:
 
     _select_privacy_policy_option(page, content_frame, privacy_select, app_name)
 
-    save_targets = [
-        content_frame.get_by_role("button", name=re.compile(r"^保存$")),
-        content_frame.locator("button.el-button--primary").filter(has_text=re.compile(r"^保存$")),
-        content_frame.locator("button").filter(has_text=re.compile(r"^保存$")),
-        page.get_by_role("button", name=re.compile(r"^保存$")),
-        page.locator("button").filter(has_text=re.compile(r"^保存$")),
-    ]
-    click_first_visible(page, save_targets, label="保存", timeout_ms=5_000)
-    page.wait_for_timeout(800)
+    click_version_ready_submit_save(page, timeout_ms=10_000)
 
 
 def configure_privacy_agreement(

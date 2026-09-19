@@ -272,7 +272,7 @@ def stream_agent(raw_messages: list[dict[str, str]]):
     )
 
     try:
-        max_rounds = 8
+        max_rounds = 16
         for round_no in range(1, max_rounds + 1):
             _llm_call_count += 1
             call_no = _llm_call_count

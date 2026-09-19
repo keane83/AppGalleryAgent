@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -9,26 +10,29 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
 from app.config import _PROJECT_ROOT
+
+load_dotenv(_PROJECT_ROOT / ".env", override=True)
 
 logger = logging.getLogger("haa.hdc")
 
 DEFAULT_DEVECO = Path("/Applications/DevEco-Studio.app/Contents")
 SCREENSHOT_WIDTH = 1080
 SCREENSHOT_HEIGHT = 1920
-DEVICE_BOOT_TIMEOUT_SEC = 120
+DEVICE_BOOT_TIMEOUT_SEC = 180
 APP_FOREGROUND_TIMEOUT_SEC = 60
 APP_FOREGROUND_POLL_SEC = 0.35
 PAGE_RENDER_SETTLE_SEC = 1.2
 FLUTTER_RENDER_SETTLE_SEC = 2.5
 FIRST_SHOT_EXTRA_SETTLE_SEC = 1.5
 FLUTTER_FIRST_EXTRA_SETTLE_SEC = FIRST_SHOT_EXTRA_SETTLE_SEC
-WEBVIEW_RENDER_SETTLE_SEC = 2.0
-WEBVIEW_FIRST_EXTRA_SETTLE_SEC = 4.0
-WEBVIEW_ACTION_EXTRA_WAIT_SEC = 1.5
+WEBVIEW_RENDER_SETTLE_SEC = float(os.getenv("HARMONY_WEBVIEW_RENDER_WAIT_SEC", "1.5"))
+WEBVIEW_FIRST_EXTRA_SETTLE_SEC = float(os.getenv("HARMONY_WEBVIEW_FIRST_EXTRA_WAIT_SEC", "2.5"))
+WEBVIEW_ACTION_EXTRA_WAIT_SEC = float(os.getenv("HARMONY_WEBVIEW_ACTION_EXTRA_WAIT_SEC", "1.0"))
 
 # 兼容旧引用
 PAGE_RENDER_WAIT_SEC = PAGE_RENDER_SETTLE_SEC
@@ -48,7 +52,7 @@ def _reload_harmony_env(*, force: bool = False) -> dict[str, str]:
         os.getenv("DEVECO_STUDIO_PATH", str(DEFAULT_DEVECO))
     ).expanduser()
     sdk_default = deveco / "sdk/default/openharmony/toolchains/hdc"
-    return {
+    env = {
         "hdc": os.getenv(
             "HARMONY_HDC_PATH",
             str(sdk_default if sdk_default.is_file() else shutil.which("hdc") or sdk_default),
@@ -62,6 +66,7 @@ def _reload_harmony_env(*, force: bool = False) -> dict[str, str]:
             str(deveco / "tools/emulator/Emulator"),
         ),
         "emulator_name": (os.getenv("HARMONY_EMULATOR_NAME") or "Mate 70 Pro").strip(),
+        "boot_timeout": os.getenv("HARMONY_EMULATOR_BOOT_TIMEOUT_SEC", "180").strip(),
     }
     _HARMONY_ENV_CACHE = env
     return env
@@ -89,19 +94,124 @@ def list_targets() -> list[str]:
     return targets
 
 
-def wait_for_device(timeout_sec: int = DEVICE_BOOT_TIMEOUT_SEC) -> str:
-    deadline = time.time() + timeout_sec
+def _restart_hdc_server() -> None:
+    proc = run_hdc("start", "-r", timeout=15)
+    if proc.returncode != 0:
+        logger.warning("hdc start -r 失败: %s", (proc.stderr or proc.stdout or "").strip())
+
+
+def _list_emulator_instances() -> list[dict[str, Any]]:
+    env = _reload_harmony_env()
+    emulator_bin = Path(env["emulator"])
+    if not emulator_bin.is_file():
+        return []
+    proc = subprocess.run(
+        [str(emulator_bin), "-list", "-details"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if proc.returncode != 0:
+        logger.warning("Emulator -list -details 失败: %s", (proc.stderr or proc.stdout or "").strip())
+        return []
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        logger.warning("Emulator -list -details 返回非 JSON")
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _find_emulator_instance(name: str) -> dict[str, Any] | None:
+    for item in _list_emulator_instances():
+        if str(item.get("name") or "").strip() == name.strip():
+            return item
+    return None
+
+
+def _is_emulator_running(name: str) -> bool:
+    item = _find_emulator_instance(name)
+    return bool(item and str(item.get("isRunning") or "").lower() == "true")
+
+
+def _accept_emulator_license(emulator_bin: Path) -> None:
+    proc = subprocess.run(
+        [str(emulator_bin), "-license", "accept"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if proc.returncode != 0:
+        logger.warning("Emulator 协议自动接受失败: %s", (proc.stderr or proc.stdout or "").strip()[:300])
+
+
+def _start_emulator(emulator_bin: Path, name: str) -> None:
+    _accept_emulator_license(emulator_bin)
+    logger.info("正在启动 HarmonyOS 模拟器：%s", name)
+    proc = subprocess.Popen(
+        [str(emulator_bin), "-start", name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    time.sleep(1.0)
+    if proc.poll() is not None and proc.stderr is not None:
+        err = proc.stderr.read().decode("utf-8", errors="ignore").strip()
+        if err:
+            raise RuntimeError(f"模拟器启动失败：{err[:500]}")
+
+
+def _resolve_boot_timeout() -> int:
+    env = _reload_harmony_env()
+    try:
+        return max(60, int(env.get("boot_timeout") or DEVICE_BOOT_TIMEOUT_SEC))
+    except ValueError:
+        return DEVICE_BOOT_TIMEOUT_SEC
+
+
+def wait_for_device(
+    timeout_sec: int | None = None,
+    *,
+    emulator_name: str | None = None,
+) -> str:
+    timeout = timeout_sec or _resolve_boot_timeout()
+    deadline = time.time() + timeout
+    poll = 0
     while time.time() < deadline:
         targets = list_targets()
         if targets:
+            logger.info("hdc 已连接设备：%s", targets[0])
             return targets[0]
+
+        poll += 1
+        if poll % 5 == 0:
+            _restart_hdc_server()
+            if emulator_name and _is_emulator_running(emulator_name):
+                logger.info("模拟器 %s 进程已运行，等待 hdc 连接…", emulator_name)
+            else:
+                logger.info("等待模拟器启动并建立 hdc 连接…")
+
         time.sleep(2)
-    raise TimeoutError(f"{timeout_sec}s 内未检测到 hdc 设备")
+
+    hint = ""
+    if emulator_name:
+        item = _find_emulator_instance(emulator_name)
+        running = str((item or {}).get("isRunning") or "false")
+        hint = f" 模拟器「{emulator_name}」isRunning={running}。"
+    raise TimeoutError(
+        f"{timeout}s 内未检测到 hdc 设备。{hint}"
+        "可在 DevEco Device Manager 手动启动模拟器后重试；"
+        "或确认 .env 中 HARMONY_EMULATOR_NAME 与 Emulator -list 输出一致。"
+    )
 
 
 def ensure_emulator_running() -> str:
+    """确保 hdc 可用：已有设备则复用，否则自动启动 .env 配置的模拟器。"""
     targets = list_targets()
     if targets:
+        logger.info("复用已连接 hdc 设备：%s", targets[0])
         return targets[0]
 
     env = _reload_harmony_env()
@@ -110,13 +220,27 @@ def ensure_emulator_running() -> str:
         raise FileNotFoundError(f"模拟器可执行文件不存在：{emulator_bin}")
 
     avd = env["emulator_name"]
-    subprocess.Popen(
-        [str(emulator_bin), "-avd", avd],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    return wait_for_device()
+    instance = _find_emulator_instance(avd)
+    if instance is None:
+        available = [str(item.get("name") or "") for item in _list_emulator_instances()]
+        available = [name for name in available if name]
+        raise RuntimeError(
+            f"未找到名为「{avd}」的模拟器实例。"
+            f"可用实例：{', '.join(available) or '无'}。"
+            "请在 .env 设置 HARMONY_EMULATOR_NAME 为本机 Emulator -list 中的名称。"
+        )
+
+    device_type = str(instance.get("deviceType") or "")
+    if device_type and device_type != "phone":
+        logger.warning("模拟器 %s 类型为 %s（工程一般为 phone）", avd, device_type)
+
+    if not _is_emulator_running(avd):
+        _start_emulator(emulator_bin, avd)
+    else:
+        logger.info("模拟器 %s 已在运行，等待 hdc 连接", avd)
+        _restart_hdc_server()
+
+    return wait_for_device(emulator_name=avd)
 
 
 def force_stop_app(bundle_name: str) -> None:

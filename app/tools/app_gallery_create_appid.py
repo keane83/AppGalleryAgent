@@ -14,7 +14,69 @@ from app.tools.app_gallery_auth import build_api_client_headers, resolve_api_aut
 # 文档：https://developer.huawei.com/consumer/cn/doc/app/agc-help-provision-api-create-appid-0000002526543939
 # 接口：POST /publish/v3/app?projectId=...
 CREATE_APP_ID_PATH = "/publish/v3/app"
+LOOKUP_APP_ID_PATH = "/publish/v2/appid-list"
 PARENT_TYPE_APP = 13
+
+
+def _is_package_name_used_error(ret: dict[str, Any] | None) -> bool:
+    if not isinstance(ret, dict):
+        return False
+    msg = str(ret.get("msg") or "").lower()
+    code = ret.get("code")
+    return code in (204144746, "204144746") or "pkg's name has been used" in msg or "包名" in msg
+
+
+def lookup_app_id_by_package(
+    package_name: str,
+    *,
+    access_token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """按包名查询已有 APP ID（包名已注册时用于全流程重跑）。"""
+    package = (package_name or "").strip()
+    if not package:
+        raise ValueError("packageName 不能为空")
+
+    token, client_id = resolve_api_auth(access_token)
+    url = f"{APP_GALLERY_API_BASE_URL.rstrip('/')}{LOOKUP_APP_ID_PATH}"
+    headers = build_api_client_headers(token, client_id)
+
+    with httpx.Client(timeout=timeout) as client:
+        response = client.get(url, headers=headers, params={"packageName": package})
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise RuntimeError(
+            f"查询 APP ID 失败：HTTP {response.status_code}，响应非 JSON：{response.text[:300]}"
+        ) from exc
+
+    ret = data.get("ret") if isinstance(data, dict) else None
+    ret_code = ret.get("code") if isinstance(ret, dict) else None
+    if response.status_code != 200 or (isinstance(ret, dict) and ret_code not in (0, "0")):
+        raise RuntimeError(
+            f"查询 APP ID 失败：HTTP {response.status_code}，响应={json.dumps(data, ensure_ascii=False)}"
+        )
+
+    appids = data.get("appids") if isinstance(data, dict) else None
+    if not isinstance(appids, list) or not appids:
+        raise RuntimeError(f"包名 {package} 未找到已注册的 APP ID")
+
+    first = appids[0] if isinstance(appids[0], dict) else {}
+    app_id = str(first.get("value") or "").strip()
+    app_name = str(first.get("key") or "").strip()
+    if not app_id:
+        raise RuntimeError(
+            f"查询 APP ID 失败：响应格式异常，响应={json.dumps(data, ensure_ascii=False)}"
+        )
+
+    return {
+        "appId": app_id,
+        "appName": app_name,
+        "packageName": package,
+        "existing": True,
+        "raw": data,
+    }
 
 
 def create_app_id(
@@ -72,6 +134,17 @@ def create_app_id(
             f"创建 APP ID 失败：HTTP {response.status_code}，响应={json.dumps(data, ensure_ascii=False)}"
         )
     if isinstance(ret, dict) and ret_code not in (0, "0"):
+        if _is_package_name_used_error(ret):
+            existing = lookup_app_id_by_package(package, access_token=token)
+            return {
+                "appId": existing["appId"],
+                "appName": existing.get("appName") or name,
+                "packageName": package,
+                "parentType": parent_type,
+                "projectId": pid,
+                "existing": True,
+                "raw": existing.get("raw"),
+            }
         raise RuntimeError(
             f"创建 APP ID 失败：ret={json.dumps(ret, ensure_ascii=False)}，响应={json.dumps(data, ensure_ascii=False)}"
         )
@@ -106,14 +179,15 @@ def create_app_gallery_app_id(appName: str, packageName: str) -> str:
     except Exception as exc:
         return f"创建 APP ID 失败: {exc}"
 
-    return json.dumps(
-        {
-            "ok": True,
-            "appId": result["appId"],
-            "appName": result["appName"],
-            "packageName": result["packageName"],
-            "parentType": result["parentType"],
-            "projectId": result["projectId"],
-        },
-        ensure_ascii=False,
-    )
+    payload: dict[str, Any] = {
+        "ok": True,
+        "appId": result["appId"],
+        "appName": result["appName"],
+        "packageName": result["packageName"],
+        "parentType": result["parentType"],
+        "projectId": result["projectId"],
+    }
+    if result.get("existing"):
+        payload["existing"] = True
+        payload["note"] = "包名已存在，已复用已有 appId（全流程重跑时正常）"
+    return json.dumps(payload, ensure_ascii=False)

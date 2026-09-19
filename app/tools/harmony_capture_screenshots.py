@@ -295,20 +295,28 @@ def capture_harmony_screenshots(
         patch_info = web_patch_info
     logger.info("工程 patch 完成，耗时 %.1fs", time.time() - patch_started)
 
-    hap_path: Path | None = _build_and_install(
-        kind=kind,
-        ohos_root=ohos_root,
-        flutter_root=flutter_root,
-        rebuild=rebuild,
-        patch_info=patch_info,
-        web_patch_info=web_patch_info,
-    )
-
     output_dir = _screenshot_output_dir(app_name=app_name)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    icon_info = export_app_icon_1024(ohos_root, output_dir)
-    logger.info("应用图标已导出: %s", icon_info.get("path"))
+    build_started = time.time()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        hap_future = pool.submit(
+            _build_and_install,
+            kind=kind,
+            ohos_root=ohos_root,
+            flutter_root=flutter_root,
+            rebuild=rebuild,
+            patch_info=patch_info,
+            web_patch_info=web_patch_info,
+        )
+        icon_future = pool.submit(export_app_icon_1024, ohos_root, output_dir)
+        hap_path = hap_future.result()
+        icon_info = icon_future.result()
+    logger.info(
+        "编译安装 + 图标导出完成，耗时 %.1fs；图标 %s",
+        time.time() - build_started,
+        icon_info.get("path"),
+    )
 
     if kind == ProjectKind.WEBVIEW_HTML:
         captured = _capture_webview(bundle_name=bundle_name, shots=shots, output_dir=output_dir)
@@ -353,7 +361,8 @@ def capture_harmony_screenshots(
 def capture_harmony_screenshots_and_app_icon(projectPath: str) -> str:
     """获取应用商店素材：3 张 1080x1920 截图 + 1024x1024 应用图标（PNG）。
 
-    截图：HarmonyOS 模拟器自动截取 3 张商店介绍图。
+    截图：HarmonyOS 模拟器自动截取 3 张商店介绍图（无 hdc 设备时会按 HARMONY_EMULATOR_NAME 自动启动模拟器）。
+    WebView HTML 工程：启发式无法识别 Tab 时，会自动将 HTML 导航/脚本片段送本地 Ollama 规划切页 JS（HARMONY_WEBVIEW_LLM_AUTO，默认开启）。
     图标：从工程 AppScope/entry 资源提取并导出 app_icon_1024.png（1024x1024 PNG）。
 
     自动识别工程类型：

@@ -9,9 +9,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.config import APP_GALLERY_LISTING_ANALYSIS_MODE
 from app.tools.app_gallery_category_tags import (
     format_category_tag_options_for_categories,
     rank_categories_by_text,
+    resolve_best_category_tag,
     validate_category_tag,
 )
 from app.tools.harmony_llm_planner import request_ollama_json
@@ -28,7 +30,9 @@ MAX_DESC_LEN = 500
 MAX_BRIEF_LEN = 15
 MAX_FILE_CHARS = 1800
 MAX_CONTEXT_CHARS = 10_000
+MAX_LIGHT_CONTEXT_CHARS = 2500
 MAX_SOURCE_FILES = 4
+MAX_LIGHT_SOURCE_FILES = 1
 
 _SKIP_PATH_PARTS = (
     "/test/",
@@ -86,8 +90,15 @@ def _collect_native_pages(ohos_root: Path) -> list[str]:
         return []
 
 
-def collect_project_marketing_context(project_path: str | Path) -> dict[str, Any]:
+def collect_project_marketing_context(
+    project_path: str | Path,
+    *,
+    light: bool = False,
+) -> dict[str, Any]:
     """收集用于生成商店文案的工程上下文。"""
+    max_source_files = MAX_LIGHT_SOURCE_FILES if light else MAX_SOURCE_FILES
+    max_context_chars = MAX_LIGHT_CONTEXT_CHARS if light else MAX_CONTEXT_CHARS
+    max_file_chars = 900 if light else MAX_FILE_CHARS
     resolved = resolve_project_paths(project_path)
     ohos_root = resolved["ohosRoot"]
     assert isinstance(ohos_root, Path)
@@ -114,32 +125,39 @@ def collect_project_marketing_context(project_path: str | Path) -> dict[str, Any
         parts.append("页面列表: " + ", ".join(pages))
 
     added_sources = 0
-    for page_route in pages:
-        if added_sources >= MAX_SOURCE_FILES:
-            break
-        source = _resolve_page_source(ohos_root, page_route)
-        if source is None:
-            continue
-        rel = source.relative_to(ohos_root).as_posix()
-        parts.append(f"=== {rel} ===\n{_read_excerpt(source, MAX_FILE_CHARS)}")
-        added_sources += 1
+    if not light:
+        for page_route in pages:
+            if added_sources >= max_source_files:
+                break
+            source = _resolve_page_source(ohos_root, page_route)
+            if source is None:
+                continue
+            rel = source.relative_to(ohos_root).as_posix()
+            parts.append(f"=== {rel} ===\n{_read_excerpt(source, max_file_chars)}")
+            added_sources += 1
 
-    if added_sources == 0:
-        for pattern in ("entry/src/main/ets/pages/*.ets", "entry/src/main/ets/*Page.ets"):
-            for path in sorted(ohos_root.glob(pattern)):
-                if added_sources >= MAX_SOURCE_FILES or _should_skip_source(path):
-                    continue
-                rel = path.relative_to(ohos_root).as_posix()
-                parts.append(f"=== {rel} ===\n{_read_excerpt(path, MAX_FILE_CHARS)}")
-                added_sources += 1
+        if added_sources == 0:
+            for pattern in ("entry/src/main/ets/pages/*.ets", "entry/src/main/ets/*Page.ets"):
+                for path in sorted(ohos_root.glob(pattern)):
+                    if added_sources >= max_source_files or _should_skip_source(path):
+                        continue
+                    rel = path.relative_to(ohos_root).as_posix()
+                    parts.append(f"=== {rel} ===\n{_read_excerpt(path, max_file_chars)}")
+                    added_sources += 1
+    elif pages:
+        first_source = _resolve_page_source(ohos_root, pages[0])
+        if first_source is not None:
+            rel = first_source.relative_to(ohos_root).as_posix()
+            parts.append(f"=== {rel} ===\n{_read_excerpt(first_source, max_file_chars)}")
 
     if flutter_root and flutter_root.is_dir():
         pubspec = flutter_root / "pubspec.yaml"
         if pubspec.is_file():
-            parts.append(f"=== pubspec.yaml ===\n{_read_excerpt(pubspec, 1200)}")
-        main_dart = flutter_root / "lib/main.dart"
-        if main_dart.is_file():
-            parts.append(f"=== lib/main.dart ===\n{_read_excerpt(main_dart, MAX_FILE_CHARS)}")
+            parts.append(f"=== pubspec.yaml ===\n{_read_excerpt(pubspec, 600 if light else 1200)}")
+        if not light:
+            main_dart = flutter_root / "lib/main.dart"
+            if main_dart.is_file():
+                parts.append(f"=== lib/main.dart ===\n{_read_excerpt(main_dart, max_file_chars)}")
 
     readme = resolved["inputPath"]
     if isinstance(readme, Path):
@@ -150,8 +168,12 @@ def collect_project_marketing_context(project_path: str | Path) -> dict[str, Any
                 break
 
     context_text = "\n\n".join(parts)
-    if len(context_text) > MAX_CONTEXT_CHARS:
-        context_text = context_text[: MAX_CONTEXT_CHARS // 2] + "\n\n/* ... truncated ... */\n\n" + context_text[-MAX_CONTEXT_CHARS // 2 :]
+    if len(context_text) > max_context_chars:
+        context_text = (
+            context_text[: max_context_chars // 2]
+            + "\n\n/* ... truncated ... */\n\n"
+            + context_text[-max_context_chars // 2 :]
+        )
 
     return {
         "appName": app_name,
@@ -269,24 +291,55 @@ def _parse_llm_ids(raw: dict[str, Any]) -> tuple[int, int]:
     return int(harmony_child_type), int(kind_main_tag)
 
 
-def analyze_app_gallery_listing(project_path: str | Path) -> dict[str, Any]:
-    """用 LLM 分析工程，返回分类/标签/介绍/一句话简介（单次 LLM 调用）。"""
-    started = time.time()
-    context = collect_project_marketing_context(project_path)
-    collect_ms = int((time.time() - started) * 1000)
+def _analysis_mode() -> str:
+    mode = (APP_GALLERY_LISTING_ANALYSIS_MODE or "fast").strip().lower()
+    if mode in {"heuristic", "fast", "llm"}:
+        return mode
+    logger.warning("未知 APP_GALLERY_LISTING_ANALYSIS_MODE=%s，回退 fast", mode)
+    return "fast"
 
+
+def _keyword_category_result(context: dict[str, Any]) -> dict[str, Any]:
+    text = f"{context.get('appName', '')}\n{context.get('contextText', '')}"
+    entry = resolve_best_category_tag(text)
+    return {
+        "harmonyChildType": int(entry["secondCategoryId"]),
+        "kindMainTag": int(entry["tagId"]),
+        "categoryName": str(entry["category"]),
+        "tagName": str(entry["tag"]),
+        "entry": entry,
+    }
+
+
+def _llm_generate_listing_copy(
+    context: dict[str, Any],
+    *,
+    category_name: str,
+    tag_name: str,
+) -> dict[str, Any]:
+    """仅生成 appDesc / briefInfo（分类已由关键词确定，prompt 更小）。"""
+    system = (
+        "你是华为 AppGallery 商店文案助手。"
+        "根据应用信息撰写客观、合规的中文商店文案。"
+        "输出严格 JSON，不要 markdown。"
+        f"appDesc 不超过 {MAX_DESC_LEN} 字，briefInfo 不超过 {MAX_BRIEF_LEN} 字。"
+    )
+    user = (
+        f"应用名: {context.get('appName', '')}\n"
+        f"包名: {context.get('bundleName', '')}\n"
+        f"已选分类: {category_name} / {tag_name}\n\n"
+        f"工程摘要:\n{context.get('contextText', '')}\n\n"
+        '输出 JSON: {"appDesc":"...","briefInfo":"...","reason":"..."}'
+    )
+    return request_ollama_json(system, user, num_predict=900, timeout=90.0)
+
+
+def _llm_full_listing_analysis(context: dict[str, Any]) -> dict[str, Any]:
+    """完整 LLM 分析：分类+标签+文案（旧模式，较慢）。"""
     candidate_categories = rank_categories_by_text(
         f"{context.get('appName', '')}\n{context.get('contextText', '')}"
     )
     category_table = format_category_tag_options_for_categories(candidate_categories)
-    logger.info(
-        "AppGallery 工程上下文已收集: chars=%s files~=%s candidateCategories=%s collectMs=%s",
-        len(context.get("contextText") or ""),
-        min(MAX_SOURCE_FILES, len(candidate_categories) + 2),
-        candidate_categories,
-        collect_ms,
-    )
-
     system = (
         "你是华为 AppGallery HarmonyOS 应用商店上架助手。"
         "根据工程信息，从给定分类/标签表中选择最合适的一项，并撰写中文商店文案。"
@@ -305,12 +358,83 @@ def analyze_app_gallery_listing(project_path: str | Path) -> dict[str, Any]:
         '"categoryName":"教育","tagName":"学习",'
         '"appDesc":"...","briefInfo":"...","reason":"..."}'
     )
+    return request_ollama_json(system, user, num_predict=1200, timeout=180.0)
+
+
+def analyze_app_gallery_listing(project_path: str | Path) -> dict[str, Any]:
+    """分析工程，返回分类/标签/介绍/一句话简介。"""
+    started = time.time()
+    mode = _analysis_mode()
+    light = mode == "fast"
+    context = collect_project_marketing_context(project_path, light=light)
+    collect_ms = int((time.time() - started) * 1000)
+
+    logger.info(
+        "AppGallery 工程上下文已收集: mode=%s chars=%s collectMs=%s",
+        mode,
+        len(context.get("contextText") or ""),
+        collect_ms,
+    )
+
+    if mode == "heuristic":
+        result = _heuristic_fallback(context)
+        result["source"] = "heuristic"
+        logger.info("AppGallery 启发式分析完成: totalMs=%s", int((time.time() - started) * 1000))
+        log_analysis_result(result)
+        return result
+
+    if mode == "fast":
+        picked = _keyword_category_result(context)
+        llm_started = time.time()
+        try:
+            raw = _llm_generate_listing_copy(
+                context,
+                category_name=picked["categoryName"],
+                tag_name=picked["tagName"],
+            )
+            logger.info(
+                "AppGallery fast LLM 文案完成: llmMs=%s totalMs=%s",
+                int((time.time() - llm_started) * 1000),
+                int((time.time() - started) * 1000),
+            )
+        except Exception as exc:
+            logger.warning("AppGallery fast 文案 LLM 失败，使用模板兜底: %s", exc)
+            fallback = _heuristic_fallback(context)
+            fallback["harmonyChildType"] = picked["harmonyChildType"]
+            fallback["kindMainTag"] = picked["kindMainTag"]
+            fallback["categoryName"] = picked["categoryName"]
+            fallback["tagName"] = picked["tagName"]
+            fallback["source"] = "keyword+heuristic"
+            log_analysis_result(fallback)
+            return fallback
+
+        app_desc = _truncate(str(raw.get("appDesc") or ""), MAX_DESC_LEN)
+        brief_info = _truncate(str(raw.get("briefInfo") or picked["tagName"]), MAX_BRIEF_LEN)
+        if not app_desc:
+            app_desc = _heuristic_fallback(context)["appDesc"]
+        if not brief_info:
+            brief_info = _truncate(str(context.get("appName") or picked["tagName"]), MAX_BRIEF_LEN)
+
+        result = _build_analysis_result(
+            harmony_child_type=picked["harmonyChildType"],
+            kind_main_tag=picked["kindMainTag"],
+            category_name=picked["categoryName"],
+            tag_name=picked["tagName"],
+            app_desc=app_desc,
+            brief_info=brief_info,
+            reason=str(raw.get("reason") or "关键词匹配分类，LLM 生成文案"),
+            source="keyword+llm",
+            context=context,
+            raw_llm=raw,
+        )
+        log_analysis_result(result)
+        return result
 
     llm_started = time.time()
     try:
-        raw = request_ollama_json(system, user)
+        raw = _llm_full_listing_analysis(context)
         logger.info(
-            "AppGallery LLM 分析完成: llmMs=%s totalMs=%s",
+            "AppGallery LLM 全量分析完成: llmMs=%s totalMs=%s",
             int((time.time() - llm_started) * 1000),
             int((time.time() - started) * 1000),
         )

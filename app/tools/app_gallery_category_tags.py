@@ -69,6 +69,38 @@ _CATEGORY_KEYWORDS: dict[int, tuple[str, ...]] = {
 }
 
 
+def resolve_best_category_tag(text: str) -> dict[str, Any]:
+    """根据应用名/源码关键词直接选出分类+标签（无 LLM）。"""
+    blob = (text or "").lower()
+    categories = rank_categories_by_text(text)
+    best_entry: dict[str, Any] | None = None
+    best_score = -1
+
+    for category_id in categories:
+        for item in CATEGORY_TAG_ENTRIES:
+            if int(item["secondCategoryId"]) != category_id:
+                continue
+            tag = str(item["tag"])
+            score = 0
+            if tag.lower() in blob:
+                score += 4
+            for kw in _CATEGORY_KEYWORDS.get(category_id, ()):
+                kw_l = kw.lower()
+                if kw_l in blob and (kw_l in tag.lower() or tag.lower() in kw_l):
+                    score += 2
+            if score > best_score:
+                best_score = score
+                best_entry = item
+
+    if best_entry is not None:
+        return best_entry
+
+    fallback = find_entry_by_tag_id(15000005)
+    if fallback is not None:
+        return fallback
+    return CATEGORY_TAG_ENTRIES[0]
+
+
 def rank_categories_by_text(text: str, *, max_categories: int = 4) -> list[int]:
     """根据应用名/源码关键词为 LLM 预筛二级分类（默认工具类兜底）。"""
     blob = (text or "").lower()

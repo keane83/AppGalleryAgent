@@ -15,7 +15,7 @@ from playwright.sync_api import Frame, Locator, Page
 
 from app.config import AGC_BROWSER_USER_DATA_DIR, AGC_STORAGE_STATE_PATH
 from app.tools.agc_browser import (
-    click_first_visible,
+    click_version_ready_submit_save,
     debug_frames_summary,
     dismiss_blocking_tips,
     launch_agc_context,
@@ -215,23 +215,15 @@ def _click_collect_no_radio(page: Page, frame: Frame, radio: Locator) -> None:
         raise RuntimeError(f"未能选择「否」：{last_error}")
 
 
-def _save_version_if_present(page: Page, frame: Frame) -> None:
-    save_targets = [
-        frame.get_by_role("button", name=re.compile(r"^保存$")),
-        frame.locator("button.el-button--primary").filter(has_text=re.compile(r"^保存$")),
-        frame.locator("button").filter(has_text=re.compile(r"^保存$")),
-        page.get_by_role("button", name=re.compile(r"^保存$")),
-        page.locator("button").filter(has_text=re.compile(r"^保存$")),
-    ]
-    click_first_visible(page, save_targets, label="保存", timeout_ms=5_000)
-    page.wait_for_timeout(800)
+def _save_version_if_present(page: Page) -> None:
+    click_version_ready_submit_save(page, timeout_ms=10_000)
 
 
 def _set_privacy_label_no_collect(page: Page) -> None:
     wait_for_version_detail_loaded(page, timeout_ms=30_000)
     content_frame, radio = _find_privacy_collect_no_radio(page, timeout_ms=20_000)
     _click_collect_no_radio(page, content_frame, radio)
-    _save_version_if_present(page, content_frame)
+    _save_version_if_present(page)
 
 
 def set_privacy_tag_no_collect(*, app_name: str, bundle_id: str = "") -> dict[str, Any]:

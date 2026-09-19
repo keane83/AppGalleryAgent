@@ -327,8 +327,125 @@ def click_first_visible(
     raise RuntimeError(f"未找到可点击的「{label}」：{last_error}")
 
 
+def wait_for_dialog_overlays_closed(page: Page, *, timeout_ms: int = 12_000) -> None:
+    """等待 Element Plus 弹层关闭（年龄分级等流程结束后才能点右上角保存）。"""
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        visible = False
+        try:
+            overlays = page.locator(".el-overlay-dialog, .el-overlay")
+            for index in range(overlays.count()):
+                if overlays.nth(index).is_visible(timeout=120):
+                    visible = True
+                    break
+        except Exception:  # noqa: BLE001
+            return
+        if not visible:
+            return
+        page.wait_for_timeout(250)
+
+
+_CLICK_VERSION_SAVE_JS = """
+() => {
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return false;
+    const s = window.getComputedStyle(el);
+    return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0;
+  };
+  const saves = [...document.querySelectorAll('button, .el-button')].filter((btn) => {
+    return (btn.innerText || btn.textContent || '').trim() === '保存' && visible(btn);
+  });
+  if (!saves.length) return false;
+  saves.sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right);
+  const btn = saves.find((b) => b.getBoundingClientRect().top < 240) || saves[0];
+  btn.scrollIntoView({ block: 'center', behavior: 'instant' });
+  btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+  btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+  btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  btn.click?.();
+  return true;
+}
+"""
+
+
+def click_version_ready_submit_save(page: Page, *, timeout_ms: int = 12_000) -> None:
+    """版本「准备提交」页右上角「保存」（与隐私政策/年龄分级共用）。"""
+    wait_for_dialog_overlays_closed(page, timeout_ms=min(timeout_ms, 12_000))
+    content_frame = wait_for_version_detail_loaded(page, timeout_ms=min(timeout_ms, 20_000))
+    page.wait_for_timeout(400)
+
+    contexts: list[Page | Frame] = [page]
+    if content_frame not in contexts:
+        contexts.append(content_frame)
+    for frame in page.frames:
+        if frame not in contexts:
+            contexts.append(frame)
+
+    deadline = time.time() + timeout_ms / 1000
+    last_error: Exception | None = None
+    save_pat = re.compile(r"^保存$")
+
+    while time.time() < deadline:
+        for ctx in contexts:
+            try:
+                if ctx.evaluate(_CLICK_VERSION_SAVE_JS):
+                    page.wait_for_timeout(800)
+                    return
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+
+            for locator in (
+                ctx.locator("button:visible, .el-button:visible").filter(has_text=save_pat).last,
+                ctx.get_by_role("button", name=save_pat).last,
+                ctx.locator("button.el-button--primary:visible").filter(has_text=save_pat).last,
+            ):
+                try:
+                    if not locator.count():
+                        continue
+                    target = locator
+                    target.scroll_into_view_if_needed(timeout=2_000)
+                    target.click(timeout=3_000, force=True)
+                    page.wait_for_timeout(800)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+        page.wait_for_timeout(300)
+
+    raise RuntimeError(f"未找到可点击的版本页「保存」按钮：{last_error}")
+
+
+_VERSION_DETAIL_MARKERS = ("隐私政策", "内容分级", "年龄分级", "新版本 - 准备提交", "新版本")
+
+
+def find_version_detail_frame(page: Page, *, timeout_ms: int = 500) -> Frame | None:
+    """在 iframe 中查找版本「准备提交」编辑页（含隐私政策 / 内容分级）。"""
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        for frame in page.frames:
+            for marker in _VERSION_DETAIL_MARKERS:
+                try:
+                    label = frame.get_by_text(marker, exact=False).first
+                    if label.count() and label.is_visible(timeout=150):
+                        return frame
+                except Exception:  # noqa: BLE001
+                    continue
+            try:
+                marked = frame.locator("[data-agc-privacy-select='1']").first
+                if marked.count() and marked.is_visible(timeout=150):
+                    return frame
+            except Exception:  # noqa: BLE001
+                continue
+        page.wait_for_timeout(150)
+    return None
+
+
+def version_detail_content_visible(page: Page) -> bool:
+    return find_version_detail_frame(page, timeout_ms=400) is not None
+
+
 def wait_for_version_detail_loaded(page: Page, *, timeout_ms: int = 30_000) -> Frame:
-    """点击「准备提交」后右侧 iframe 常空白 loading，需等待「隐私政策」出现。"""
+    """点击「准备提交」后右侧 iframe 常空白 loading，需等待表单区块出现。"""
     deadline = time.time() + timeout_ms / 1000
     last_loading = True
     while time.time() < deadline:
@@ -336,21 +453,14 @@ def wait_for_version_detail_loaded(page: Page, *, timeout_ms: int = 30_000) -> F
         last_loading = loading
 
         if not loading:
-            for frame in page.frames:
-                try:
-                    label = frame.get_by_text("隐私政策", exact=False).first
-                    if label.count() and label.is_visible(timeout=250):
-                        return frame
-                    marked = frame.locator("[data-agc-privacy-select='1']").first
-                    if marked.count() and marked.is_visible(timeout=250):
-                        return frame
-                except Exception:  # noqa: BLE001
-                    continue
+            frame = find_version_detail_frame(page, timeout_ms=300)
+            if frame is not None:
+                return frame
         page.wait_for_timeout(250)
 
     hint = "仍在 loading" if last_loading else "loading 已结束但未渲染"
     raise RuntimeError(
-        f"版本详情页未加载完成（{hint}，未找到「隐私政策」）；"
+        f"版本详情页未加载完成（{hint}，未找到「隐私政策/内容分级」）；"
         f"{debug_frames_summary(page, probe_text='隐私政策')}"
     )
 
@@ -467,6 +577,24 @@ def dismiss_menu_guide_popup(page: Page) -> None:
     dismiss_blocking_tips(page)
 
 
+def _ensure_submenu_expanded(page: Page, title: str) -> None:
+    submenu = page.locator(".el-sub-menu").filter(
+        has=page.locator(".el-sub-menu__title").filter(
+            has_text=re.compile(rf"^{re.escape(title)}$")
+        )
+    ).first
+    if not submenu.count():
+        return
+    try:
+        is_open = submenu.evaluate("el => el.classList.contains('is-open')")
+    except Exception:  # noqa: BLE001
+        is_open = False
+    if is_open:
+        return
+    submenu.locator(".el-sub-menu__title").first.click(timeout=2_000)
+    page.wait_for_timeout(250)
+
+
 def _version_info_submenu(page: Page) -> Locator:
     return page.locator(".el-sub-menu").filter(
         has=page.locator(".el-sub-menu__title").filter(has_text=re.compile(r"^版本信息$"))
@@ -483,17 +611,8 @@ def _ready_submit_version_menu_item(page: Page) -> Locator:
 
 
 def _ensure_version_info_submenu_expanded(page: Page) -> None:
-    version_sub = _version_info_submenu(page)
-    if not version_sub.count():
-        return
-    try:
-        is_open = version_sub.evaluate("el => el.classList.contains('is-open')")
-    except Exception:  # noqa: BLE001
-        is_open = False
-    if is_open:
-        return
-    version_sub.locator(".el-sub-menu__title").first.click(timeout=2_000)
-    page.wait_for_timeout(200)
+    _ensure_submenu_expanded(page, "应用上架")
+    _ensure_submenu_expanded(page, "版本信息")
 
 
 def _is_ready_submit_version_active(page: Page) -> bool:
@@ -507,7 +626,7 @@ def _is_ready_submit_version_active(page: Page) -> bool:
 
 
 def navigate_to_version_ready_submit(page: Page) -> None:
-    """展开「版本信息」后点击「准备提交」子项（可有版本号前缀）。"""
+    """展开「应用上架 → 版本信息」后点击「准备提交」，并等待右侧版本表单加载。"""
     dismiss_menu_guide_popup(page)
     _ensure_version_info_submenu_expanded(page)
 
@@ -517,11 +636,28 @@ def navigate_to_version_ready_submit(page: Page) -> None:
 
     item.scroll_into_view_if_needed(timeout=4_000)
 
-    if _is_ready_submit_version_active(page):
-        return
+    need_click = not (
+        _is_ready_submit_version_active(page) and version_detail_content_visible(page)
+    )
+    if need_click:
+        item.click(timeout=3_000, force=True)
+        page.wait_for_timeout(400)
 
-    item.click(timeout=3_000, force=True)
-    page.wait_for_timeout(300)
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        if version_detail_content_visible(page):
+            return
+        if need_click:
+            page.wait_for_timeout(250)
+            continue
+        item.click(timeout=3_000, force=True)
+        need_click = True
+        page.wait_for_timeout(400)
+
+    raise RuntimeError(
+        "点击「准备提交」后版本详情未加载（仍在信息中心或未出现隐私政策/内容分级）；"
+        f"{debug_frames_summary(page, probe_text='内容分级')}"
+    )
 
 
 def open_myapp_page(

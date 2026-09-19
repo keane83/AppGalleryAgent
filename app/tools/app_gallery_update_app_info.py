@@ -356,7 +356,7 @@ def update_app_gallery_app_basic_info(
     进入「版本信息 → 准备提交 → 隐私标签信息录入」，将「是否涉及个人信息收集」选为否。
     浏览器步骤依赖已保存的 AGC 登录态（先运行 python -m app.tools.agc_browser_login）。
 
-    AI 自动分析 projectPath（单次 LLM 调用，预筛分类并忽略 test/build 等无关文件），生成并展示：
+    AI 自动分析 projectPath（默认 fast：关键词定分类 + 小 prompt 生成文案；见 APP_GALLERY_LISTING_ANALYSIS_MODE），生成并展示：
     1. 二级分类 harmonyChildType + 名称
     2. 标签 kindMainTag + 名称
     3. 应用介绍 appDesc（500 字以内）

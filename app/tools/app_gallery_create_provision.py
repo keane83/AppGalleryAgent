@@ -119,6 +119,13 @@ def apply_provision(
     download_url = provision_info.get("provisionDownloadUrl") or data.get("provisionDownloadUrl")
 
     if response.status_code != 200:
+        if response.status_code == 403 and not (data if isinstance(data, dict) else None):
+            raise RuntimeError(
+                "申请 Profile 失败：HTTP 403。"
+                f"常见原因：appId={aid} 无效或不属于当前 API 项目（全流程重跑时若包名已存在，"
+                "须用 create_app_gallery_app_id 返回的真实 appId，勿猜测旧 ID）。"
+                "请确认 APP_GALLERY_API_CERT_ID 为数字证书 ID，且 API 客户端有 Profile 权限。"
+            )
         raise RuntimeError(
             f"申请 Profile 失败：HTTP {response.status_code}，响应={json.dumps(data, ensure_ascii=False)}"
         )
