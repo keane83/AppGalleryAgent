@@ -60,15 +60,6 @@ function createStreamingAssistantMessage() {
   const toolProgressBlock = document.createElement("div");
   toolProgressBlock.className = "tool-progress-block is-hidden";
 
-  const toolProgressLabel = document.createElement("div");
-  toolProgressLabel.className = "tool-progress-label";
-  toolProgressLabel.textContent = "工具执行进度";
-
-  const toolProgressList = document.createElement("div");
-  toolProgressList.className = "tool-progress-list";
-
-  toolProgressBlock.append(toolProgressLabel, toolProgressList);
-
   const thinkingBlock = document.createElement("div");
   thinkingBlock.className = "thinking-block is-hidden";
 
@@ -92,9 +83,7 @@ function createStreamingAssistantMessage() {
     node,
     statusEl,
     toolProgressBlock,
-    toolProgressLabel,
-    toolProgressList,
-    toolProgressKeys: new Map(),
+    activeSession: null,
     activeToolName: "",
     thinkingBlock,
     thinkingText,
@@ -104,31 +93,62 @@ function createStreamingAssistantMessage() {
   };
 }
 
-function beginToolProgressSession(state, toolName) {
-  state.activeToolName = toolName || "";
-  state.toolProgressKeys.clear();
-  state.toolProgressList.replaceChildren();
-  const label = toolName ? `工具执行进度 · ${toolName}` : "工具执行进度";
-  state.toolProgressLabel.textContent = label;
+function beginToolProgressSession(state, toolName, toolLabel) {
+  if (state.activeSession) {
+    finalizeToolProgressSession(state);
+  }
+
+  const labelText = toolLabel || toolName || "当前任务";
+  const sessionEl = document.createElement("div");
+  sessionEl.className = "tool-progress-session is-active";
+
+  const sessionLabel = document.createElement("div");
+  sessionLabel.className = "tool-progress-label";
+  sessionLabel.textContent = `执行中 · ${labelText}`;
+
+  const sessionList = document.createElement("div");
+  sessionList.className = "tool-progress-list";
+
+  sessionEl.append(sessionLabel, sessionList);
+  state.toolProgressBlock.appendChild(sessionEl);
   state.toolProgressBlock.classList.remove("is-hidden");
+
+  state.activeSession = {
+    root: sessionEl,
+    labelEl: sessionLabel,
+    listEl: sessionList,
+    keys: new Map(),
+    labelText,
+  };
+  state.activeToolName = toolName || "";
   state.node.classList.remove("empty");
   chatEl.scrollTop = chatEl.scrollHeight;
 }
 
-function endToolProgressSession(state) {
+function finalizeToolProgressSession(state, { failed = false } = {}) {
+  const session = state.activeSession;
+  if (!session) return;
+
+  session.root.classList.remove("is-active");
+  session.root.classList.add(failed ? "is-failed" : "is-done");
+  session.labelEl.textContent = failed
+    ? `执行中断 · ${session.labelText}`
+    : `执行完成 · ${session.labelText}`;
+  state.activeSession = null;
   state.activeToolName = "";
-  state.toolProgressKeys.clear();
-  state.toolProgressList.replaceChildren();
-  state.toolProgressBlock.classList.add("is-hidden");
+}
+
+function endToolProgressSession(state) {
+  finalizeToolProgressSession(state);
 }
 
 function upsertToolProgress(state, data) {
-  if (!state.activeToolName) {
-    beginToolProgressSession(state, data.tool || "");
+  if (!state.activeSession) {
+    beginToolProgressSession(state, data.tool || "", data.toolLabel || "");
   }
 
   const stepKey = `${data.step || data.text || "step"}`;
-  let row = state.toolProgressKeys.get(stepKey);
+  let row = state.activeSession.keys.get(stepKey);
   if (!row) {
     row = document.createElement("div");
     row.className = "tool-progress-item";
@@ -148,8 +168,8 @@ function upsertToolProgress(state, data) {
     body.appendChild(detail);
 
     row.append(dot, body);
-    state.toolProgressList.appendChild(row);
-    state.toolProgressKeys.set(stepKey, row);
+    state.activeSession.listEl.appendChild(row);
+    state.activeSession.keys.set(stepKey, row);
   }
 
   const status = data.status || "running";
@@ -172,12 +192,21 @@ function upsertToolProgress(state, data) {
   chatEl.scrollTop = chatEl.scrollHeight;
 }
 
+function hasVisibleToolProgress(state) {
+  return (
+    state.toolProgressBlock &&
+    !state.toolProgressBlock.classList.contains("is-hidden") &&
+    state.toolProgressBlock.childElementCount > 0
+  );
+}
+
 function updateStreamingAssistant(state) {
   const hasThinking = Boolean(state.thinking.trim());
   const hasReply = Boolean(state.reply.trim());
   const hasActiveTool = Boolean(state.activeToolName);
+  const hasToolProgress = hasVisibleToolProgress(state);
 
-  if (hasThinking || hasReply || hasActiveTool) {
+  if (hasThinking || hasReply || hasActiveTool || hasToolProgress) {
     state.node.classList.remove("empty");
   }
 
@@ -274,7 +303,7 @@ async function sendMessage(text) {
           streamState.statusEl.textContent = data.text;
         } else if (data.type === "tool_session") {
           if (data.action === "start") {
-            beginToolProgressSession(streamState, data.tool || "");
+            beginToolProgressSession(streamState, data.tool || "", data.toolLabel || "");
           } else if (data.action === "end") {
             endToolProgressSession(streamState);
           }
@@ -289,7 +318,15 @@ async function sendMessage(text) {
       }
     }
 
-    if (!streamState.reply.trim() && !streamState.thinking.trim()) {
+    if (streamState.activeSession) {
+      finalizeToolProgressSession(streamState);
+    }
+
+    if (
+      !streamState.reply.trim() &&
+      !streamState.thinking.trim() &&
+      !hasVisibleToolProgress(streamState)
+    ) {
       streamState.statusEl.classList.remove("is-hidden");
       streamState.statusEl.textContent = "（没有收到回复）";
       streamState.node.classList.add("empty");
@@ -297,8 +334,14 @@ async function sendMessage(text) {
       messages.push({ role: "assistant", content: streamState.reply.trim() });
     }
   } catch (err) {
-    endToolProgressSession(streamState);
-    streamState.node.classList.add("empty");
+    finalizeToolProgressSession(streamState, { failed: true });
+    if (
+      !streamState.reply.trim() &&
+      !streamState.thinking.trim() &&
+      !hasVisibleToolProgress(streamState)
+    ) {
+      streamState.node.classList.add("empty");
+    }
     streamState.statusEl.classList.remove("is-hidden");
     streamState.statusEl.textContent = `出错了：${err.message}`;
     streamState.thinkingBlock.classList.add("is-hidden");

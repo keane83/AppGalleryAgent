@@ -130,6 +130,22 @@ body {
   border-radius: 10px;
   background: rgba(110, 168, 254, 0.06);
   border: 1px solid rgba(110, 168, 254, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tool-progress-session + .tool-progress-session {
+  padding-top: 12px;
+  border-top: 1px solid rgba(110, 168, 254, 0.16);
+}
+
+.tool-progress-session.is-done .tool-progress-label {
+  color: rgba(91, 214, 168, 0.95);
+}
+
+.tool-progress-session.is-failed .tool-progress-label {
+  color: rgba(255, 120, 120, 0.95);
 }
 
 .tool-progress-label {

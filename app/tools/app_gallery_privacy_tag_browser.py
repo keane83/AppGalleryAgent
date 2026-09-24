@@ -1,7 +1,7 @@
-"""AppGallery 控制台：「隐私标签信息录入」→ 是否涉及个人信息收集 = 否。
+"""AppGallery 控制台：隐私标签 → 是否涉及个人信息收集 = 否。
 
-注意：这与 configure_app_gallery_privacy_agreement（隐私协议草稿/关联）无关。
-定位策略与隐私政策下拉框一致：先等「隐私政策」iframe 就绪，再 JS 标记 + 轮询查找。
+DOM 锚点：.privacy-label-info-container（见 AGC 版本页实际结构）。
+与 configure_app_gallery_privacy_agreement（隐私协议）无关。
 """
 
 from __future__ import annotations
@@ -32,60 +32,95 @@ from app.tools.agc_browser import (
 logger = logging.getLogger("haa.privacy_tag_browser")
 
 _COLLECT_LABEL = "是否涉及个人信息收集"
+_CONTAINER_SELECTOR = ".privacy-label-info-container"
+_MARK_ATTR = "data-agc-privacy-collect-no"
+
+# 在 .privacy-label-info-container 内定位「否」单选框并打标
 _MARK_COLLECT_NO_JS = """
 () => {
   document.querySelectorAll('[data-agc-privacy-collect-no]').forEach((el) => {
     el.removeAttribute('data-agc-privacy-collect-no');
   });
 
-  for (const item of document.querySelectorAll('.el-form-item, tr, li')) {
-    const labelEl = item.querySelector('.el-form-item__label, label');
-    const labelText = (labelEl && labelEl.textContent) || '';
-    if (!labelText.includes('是否涉及个人信息收集')) continue;
-    const radios = item.querySelectorAll('.el-radio');
-    for (const radio of radios) {
-      const t = (radio.innerText || radio.textContent || '').trim();
-      if (t === '否' || t.startsWith('否')) {
-        radio.setAttribute('data-agc-privacy-collect-no', '1');
-        return true;
-      }
-    }
-  }
+  const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+  const radioText = (radio) => {
+    const span = radio.querySelector('.el-radio__label');
+    return norm(span ? span.textContent : radio.textContent);
+  };
 
-  const labels = [...document.querySelectorAll('*')].filter((el) => {
-    const t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
-    return t.includes('是否涉及个人信息收集') && t.length < 100;
-  });
-  for (const label of labels) {
-    let node = label;
-    for (let i = 0; i < 8 && node; i++) {
-      const radios = node.querySelectorAll?.('.el-radio') || [];
-      for (const radio of radios) {
-        const t = (radio.innerText || radio.textContent || '').trim();
-        if (t === '否' || t.startsWith('否')) {
-          radio.setAttribute('data-agc-privacy-collect-no', '1');
-          return true;
-        }
-      }
-      let sib = label;
-      for (let j = 0; j < 6 && sib; j++) {
-        sib = sib.nextElementSibling;
-        if (!sib) break;
-        const radios2 = sib.matches?.('.el-radio-group')
-          ? sib.querySelectorAll('.el-radio')
-          : sib.querySelectorAll?.('.el-radio') || [];
-        for (const radio of radios2) {
-          const t = (radio.innerText || radio.textContent || '').trim();
-          if (t === '否' || t.startsWith('否')) {
-            radio.setAttribute('data-agc-privacy-collect-no', '1');
-            return true;
-          }
-        }
-      }
-      node = node.parentElement;
+  const container = document.querySelector('.privacy-label-info-container');
+  if (!container) return { ok: false, reason: 'no_container' };
+
+  const items = container.querySelectorAll('.el-form-item');
+  for (const item of items) {
+    const labelEl = item.querySelector('.el-form-item__label');
+    const labelText = norm(labelEl && labelEl.textContent);
+    if (!labelText.includes('是否涉及个人信息收集')) continue;
+    if (labelText.includes('隐私声明') || labelText.includes('隐私政策')) continue;
+
+    for (const radio of item.querySelectorAll('label.el-radio, .el-radio')) {
+      const t = radioText(radio);
+      if (t !== '否' && !t.startsWith('否')) continue;
+      radio.setAttribute('data-agc-privacy-collect-no', '1');
+      const input = radio.querySelector('input.el-radio__original, input[type=radio]');
+      return {
+        ok: true,
+        already: !!(input && input.checked),
+        value: input ? input.value : null,
+      };
+    }
+    return { ok: false, reason: 'no_no_radio' };
+  }
+  return { ok: false, reason: 'no_form_item' };
+}
+"""
+
+# 校验容器内「否」是否已选中（value=false 或 label 文本为否）
+_VERIFY_COLLECT_NO_JS = """
+() => {
+  const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+  const container = document.querySelector('.privacy-label-info-container');
+  if (!container) return false;
+
+  const items = container.querySelectorAll('.el-form-item');
+  for (const item of items) {
+    const labelEl = item.querySelector('.el-form-item__label');
+    const labelText = norm(labelEl && labelEl.textContent);
+    if (!labelText.includes('是否涉及个人信息收集')) continue;
+
+    const byValue = item.querySelector('input.el-radio__original[value="false"], input[type=radio][value="false"]');
+    if (byValue && byValue.checked) return true;
+
+    for (const radio of item.querySelectorAll('label.el-radio.is-checked, .el-radio.is-checked')) {
+      const t = norm(radio.querySelector('.el-radio__label')?.textContent || radio.textContent);
+      if (t === '否' || t.startsWith('否')) return true;
     }
   }
   return false;
+}
+"""
+
+_CLICK_COLLECT_NO_JS = """
+() => {
+  const marked = document.querySelector('[data-agc-privacy-collect-no="1"]');
+  if (!marked) return false;
+  marked.scrollIntoView({ block: 'center', behavior: 'instant' });
+
+  const clickRadio = (el) => {
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    if (typeof el.click === 'function') el.click();
+  };
+
+  clickRadio(marked);
+  const input = marked.querySelector('input.el-radio__original, input[type=radio]');
+  if (input) {
+    input.checked = true;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  return !!(input && input.checked);
 }
 """
 
@@ -99,120 +134,138 @@ def _ensure_browser_login_ready() -> None:
     )
 
 
-def _scroll_privacy_label_section(frame: Frame) -> None:
+def _scroll_privacy_label_container(frame: Frame) -> None:
     frame.evaluate(
         """
         () => {
           const hit =
-            document.querySelector('[data-agc-privacy-collect-no="1"]') ||
-            Array.from(document.querySelectorAll('.el-form-item__label, label, h3, h4, div, section'))
-              .find((el) => {
-                const t = (el.innerText || el.textContent || '').trim();
-                return t.includes('隐私标签信息录入') || t.includes('是否涉及个人信息收集');
-              });
+            document.querySelector('.privacy-label-info-container')
+            || document.querySelector('[data-agc-privacy-collect-no="1"]')
+            || Array.from(document.querySelectorAll('.el-form-item__label'))
+              .find((el) => (el.textContent || '').includes('是否涉及个人信息收集'));
           if (hit) hit.scrollIntoView({ block: 'center', behavior: 'instant' });
-          else window.scrollBy(0, Math.max(320, window.innerHeight * 0.45));
         }
         """
     )
-    frame.page.wait_for_timeout(300)
+    frame.page.wait_for_timeout(200)
 
 
-def _mark_privacy_collect_no_radio(frame: Frame) -> bool:
-    return bool(frame.evaluate(_MARK_COLLECT_NO_JS))
+def _frame_has_privacy_container(frame: Frame) -> bool:
+    try:
+        loc = frame.locator(_CONTAINER_SELECTOR).first
+        return bool(loc.count()) and loc.is_visible(timeout=200)
+    except Exception:  # noqa: BLE001
+        return False
 
 
-def _find_privacy_collect_no_radio(page: Page, *, timeout_ms: int = 20_000) -> tuple[Frame, Locator]:
-    """与隐私政策下拉相同：全 frame 轮询 + JS 标记 + xpath 兜底。"""
+def _verify_collect_no_selected(frame: Frame) -> bool:
+    return bool(frame.evaluate(_VERIFY_COLLECT_NO_JS))
+
+
+def _try_mark_collect_no(frame: Frame) -> dict[str, Any]:
+    result = frame.evaluate(_MARK_COLLECT_NO_JS)
+    return result if isinstance(result, dict) else {"ok": False, reason: "bad_result"}
+
+
+def _find_privacy_collect_no_radio(
+    page: Page,
+    *,
+    timeout_ms: int = 8_000,
+) -> tuple[Frame, Locator | None, bool]:
+    """返回 (frame, radio_locator|None, already_selected)。"""
     deadline = time.time() + timeout_ms / 1000
-    content_frame: Frame | None = None
+    container_frame: Frame | None = None
+
     while time.time() < deadline:
         for frame in page.frames:
             try:
-                if content_frame is None:
-                    try:
-                        probe = frame.get_by_text("隐私政策", exact=False).first
-                        if probe.count() and probe.is_visible(timeout=150):
-                            content_frame = frame
-                    except Exception:  # noqa: BLE001
-                        pass
+                if container_frame is None and _frame_has_privacy_container(frame):
+                    container_frame = frame
 
-                _scroll_privacy_label_section(frame)
+                _scroll_privacy_label_container(frame)
 
-                if _mark_privacy_collect_no_radio(frame):
-                    radio = frame.locator("[data-agc-privacy-collect-no='1']").first
+                if _verify_collect_no_selected(frame):
+                    logger.info("隐私标签「否」已是选中状态，跳过点击")
+                    return frame, None, True
+
+                mark_result = _try_mark_collect_no(frame)
+                if mark_result.get("ok"):
+                    if mark_result.get("already"):
+                        logger.info("隐私标签「否」标记时已为选中，跳过点击")
+                        return frame, None, True
+                    radio = frame.locator(f"[{_MARK_ATTR}='1']").first
                     if radio.count():
-                        return frame, radio
+                        return frame, radio, False
 
-                form_item = frame.locator(".el-form-item").filter(has_text=_COLLECT_LABEL)
-                radio = form_item.locator(".el-radio").filter(has_text=re.compile(r"^否$")).first
-                if radio.count():
-                    return frame, radio
-
-                radio = frame.locator(
-                    "xpath=//*[contains(@class,'el-form-item__label') "
-                    "and contains(.,'是否涉及个人信息收集')]"
-                    "/ancestor::*[contains(@class,'el-form-item')][1]"
-                    "//label[contains(@class,'el-radio')]["
-                    ".//span[normalize-space()='否'] or normalize-space()='否']"
-                ).first
-                if radio.count():
-                    return frame, radio
-
-                radio = frame.locator(
-                    "xpath=//*[contains(normalize-space(.), '是否涉及个人信息收集')]"
-                    "/following::label[contains(@class,'el-radio')]["
-                    ".//span[normalize-space()='否'] or normalize-space()='否'][1]"
-                ).first
-                if radio.count():
-                    return frame, radio
+                # Playwright 兜底：容器内表单项
+                container = frame.locator(_CONTAINER_SELECTOR)
+                if container.count():
+                    form_item = container.locator(".el-form-item").filter(
+                        has=frame.locator(".el-form-item__label").filter(
+                            has_text=re.compile(r"是否涉及个人信息收集")
+                        )
+                    )
+                    radio = form_item.locator("label.el-radio").filter(
+                        has=frame.locator(".el-radio__label", has_text=re.compile(r"^否$"))
+                    ).first
+                    if not radio.count():
+                        radio = form_item.locator(
+                            'input.el-radio__original[value="false"]'
+                        ).locator("xpath=ancestor::label[contains(@class,'el-radio')][1]")
+                    if radio.count():
+                        return frame, radio, False
             except Exception:  # noqa: BLE001
                 continue
 
-        if content_frame is not None:
-            _scroll_privacy_label_section(content_frame)
-        page.wait_for_timeout(250)
+        page.wait_for_timeout(150)
 
     raise RuntimeError(
-        f"未找到「隐私标签信息录入 / 是否涉及个人信息收集」表单项；"
+        f"未找到 .privacy-label-info-container 或「{_COLLECT_LABEL}」单选框；"
         f"{debug_frames_summary(page, probe_text=_COLLECT_LABEL)}"
     )
 
 
-def _click_collect_no_radio(page: Page, frame: Frame, radio: Locator) -> None:
+def _click_collect_no_radio(frame: Frame, radio: Locator | None) -> None:
+    if radio is None:
+        return
+
     radio.scroll_into_view_if_needed(timeout=3_000)
     last_error: Exception | None = None
+
     for target in (
         radio,
         radio.locator(".el-radio__label"),
-        radio.locator("input[type='radio']"),
+        radio.locator("input.el-radio__original, input[type='radio']"),
     ):
         try:
             el = target.first
-            el.wait_for(state="attached", timeout=2_000)
-            el.click(timeout=2_000, force=True)
-            frame.page.wait_for_timeout(200)
-            return
+            el.wait_for(state="visible", timeout=2_000)
+            el.click(timeout=2_000)
+            frame.page.wait_for_timeout(150)
+            if _verify_collect_no_selected(frame):
+                return
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+
+    if frame.evaluate(_CLICK_COLLECT_NO_JS) and _verify_collect_no_selected(frame):
+        return
 
     handle = radio.element_handle()
     clicked = frame.evaluate(
         """(root) => {
           if (!root) return false;
           root.click();
-          const input = root.querySelector('input[type=radio]')
-            || root.closest('.el-radio')?.querySelector('input[type=radio]');
+          const input = root.querySelector('input.el-radio__original, input[type=radio]');
           if (input) {
             input.checked = true;
             input.dispatchEvent(new Event('change', { bubbles: true }));
           }
-          return true;
+          return !!(input && input.checked);
         }""",
         handle,
     )
-    if not clicked:
-        raise RuntimeError(f"未能选择「否」：{last_error}")
+    if not clicked or not _verify_collect_no_selected(frame):
+        raise RuntimeError(f"未能选择「{_COLLECT_LABEL}=否」：{last_error}")
 
 
 def _save_version_if_present(page: Page) -> None:
@@ -220,14 +273,17 @@ def _save_version_if_present(page: Page) -> None:
 
 
 def _set_privacy_label_no_collect(page: Page) -> None:
-    wait_for_version_detail_loaded(page, timeout_ms=30_000)
-    content_frame, radio = _find_privacy_collect_no_radio(page, timeout_ms=20_000)
-    _click_collect_no_radio(page, content_frame, radio)
+    wait_for_version_detail_loaded(page, timeout_ms=20_000)
+    content_frame, radio, already = _find_privacy_collect_no_radio(page, timeout_ms=8_000)
+    if not already:
+        _click_collect_no_radio(content_frame, radio)
+    if not _verify_collect_no_selected(content_frame):
+        raise RuntimeError(f"「{_COLLECT_LABEL}」未确认为「否」")
     _save_version_if_present(page)
 
 
 def set_privacy_tag_no_collect(*, app_name: str, bundle_id: str = "") -> dict[str, Any]:
-    """浏览器：版本信息 → 隐私标签信息录入 → 是否涉及个人信息收集 = 否。"""
+    """浏览器：版本信息 → 隐私标签 → 是否涉及个人信息收集 = 否。"""
     _ensure_browser_login_ready()
     name = (app_name or "").strip()
     if not name:
@@ -247,7 +303,7 @@ def set_privacy_tag_no_collect(*, app_name: str, bundle_id: str = "") -> dict[st
             "ok": True,
             "appName": name,
             "collectPersonInfo": 0,
-            "section": "隐私标签信息录入",
+            "section": "privacy-label-info-container",
             "screenshot": shot,
         }
 

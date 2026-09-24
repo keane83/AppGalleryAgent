@@ -21,6 +21,12 @@ from app.llm_factory import (
 )
 from app.logging_config import begin_request, finish_request, log_event
 from app.tool_progress import tool_progress_context
+from app.tool_labels import (
+    TOOL_STEP_LABELS,
+    sanitize_thinking_for_user,
+    user_tool_label,
+    user_tool_status_text,
+)
 from app.dsml_tools import recover_tool_calls_from_message, strip_dsml_markup
 from app.thinking import collect_agent_output, extract_message_parts
 from app.tools import TOOLS, safe_tool_log_content
@@ -75,21 +81,6 @@ FULL_FLOW_TOOL_SEQUENCE: tuple[str, ...] = (
     "configure_app_gallery_age_rating",
     "update_app_gallery_build_update_app",
 )
-
-TOOL_STEP_LABELS: dict[str, str] = {
-    "create_app_gallery_app_id": "步骤 1",
-    "create_app_gallery_provision": "步骤 2",
-    "create_app_gallery_publish_app": "步骤 3",
-    "configure_harmony_app_signing": "步骤 4",
-    "replace_harmony_app_icon": "步骤 4b",
-    "capture_harmony_screenshots_and_app_icon": "步骤 5",
-    "update_app_gallery_app_file_info": "步骤 6",
-    "update_app_gallery_app_basic_info": "步骤 7",
-    "configure_app_gallery_privacy_agreement": "步骤 8",
-    "configure_app_gallery_age_rating": "步骤 9",
-    "update_app_gallery_build_update_app": "步骤 10",
-    "get_app_gallery_access_token": "辅助",
-}
 
 
 def _latest_user_message(raw_messages: list[dict[str, str]]) -> str:
@@ -512,21 +503,6 @@ def _build_agent_llm(*, wants_tool_calls: bool) -> BaseChatModel:
     return llm
 
 
-def _format_tool_call_plan(tool_calls: list[dict[str, Any]]) -> str:
-    lines = ["【即将执行工具】"]
-    for call in tool_calls:
-        name = str(call.get("name") or "")
-        step = TOOL_STEP_LABELS.get(name, "")
-        step_prefix = f"{step} · " if step else ""
-        args = call.get("args") or {}
-        try:
-            args_text = json.dumps(args, ensure_ascii=False, indent=2)
-        except TypeError:
-            args_text = str(args)
-        lines.append(f"• {step_prefix}{name}\n  参数：{args_text}")
-    return "\n".join(lines) + "\n"
-
-
 def _recover_message_tool_calls(message: AIMessage) -> AIMessage:
     """若模型把工具调用写进 DSML 正文，解析为真实 tool_calls。"""
     if message.tool_calls:
@@ -541,17 +517,6 @@ def _recover_message_tool_calls(message: AIMessage) -> AIMessage:
         tool_calls=tool_calls,
         additional_kwargs=dict(message.additional_kwargs),
     )
-
-
-def _format_tool_result_thinking(tool_name: str, tool_result: Any) -> str:
-    """工具完成后写入思考区，便于用户跟踪全流程。"""
-    step = TOOL_STEP_LABELS.get(tool_name, "")
-    step_prefix = f"{step} " if step else ""
-    snippet = safe_tool_log_content(tool_name, tool_result)
-    text = str(snippet).strip()
-    if len(text) > 1600:
-        text = text[:1600] + "\n…（结果已截断）"
-    return f"\n【{step_prefix}{tool_name} 已完成】\n{text}\n"
 
 
 def _message_summary(message: BaseMessage) -> str:
@@ -872,7 +837,9 @@ def stream_agent(raw_messages: list[dict[str, str]]):
 
                 thinking_token = chunk.additional_kwargs.get("reasoning_content")
                 if thinking_token:
-                    yield {"type": "thinking", "token": thinking_token}
+                    sanitized = sanitize_thinking_for_user(thinking_token)
+                    if sanitized:
+                        yield {"type": "thinking", "token": sanitized}
 
                 if chunk.content:
                     if buffer_content:
@@ -886,17 +853,16 @@ def stream_agent(raw_messages: list[dict[str, str]]):
             accumulated = _recover_message_tool_calls(accumulated)
 
             if accumulated.tool_calls:
-                tool_names = ", ".join(call["name"] for call in accumulated.tool_calls)
-                yield {"type": "status", "text": f"正在调用工具：{tool_names}"}
-
-                pre_tool_thinking, pre_tool_content = extract_message_parts(accumulated)
-                plan_blob = pre_tool_thinking + pre_tool_content
-                if pre_tool_content and not _looks_like_premature_completion(plan_blob):
-                    yield {"type": "thinking", "token": "\n" + pre_tool_content.strip() + "\n\n"}
-                yield {
-                    "type": "thinking",
-                    "token": _format_tool_call_plan(accumulated.tool_calls),
-                }
+                if len(accumulated.tool_calls) == 1:
+                    yield {
+                        "type": "status",
+                        "text": user_tool_status_text(accumulated.tool_calls[0]["name"]),
+                    }
+                else:
+                    labels = "、".join(
+                        user_tool_label(call["name"]) for call in accumulated.tool_calls
+                    )
+                    yield {"type": "status", "text": f"正在执行：{labels}"}
 
                 for tool_call in accumulated.tool_calls:
                     log_event(
@@ -930,6 +896,7 @@ def stream_agent(raw_messages: list[dict[str, str]]):
                         "type": "tool_session",
                         "action": "start",
                         "tool": tool_name,
+                        "toolLabel": user_tool_label(tool_name),
                     }
                     tool_runner = _invoke_tool_with_progress(
                         tool_name, tool_args, tools_by_name
@@ -959,10 +926,6 @@ def stream_agent(raw_messages: list[dict[str, str]]):
                         )
                     )
                     tools_executed.add(tool_name)
-                    yield {
-                        "type": "thinking",
-                        "token": _format_tool_result_thinking(tool_name, tool_result),
-                    }
                 hint = _post_tool_system_hint(user_message, tools_executed=tools_executed)
                 if hint:
                     messages.append(HumanMessage(content=hint))
@@ -995,7 +958,7 @@ def stream_agent(raw_messages: list[dict[str, str]]):
 
             if buffer_content:
                 thinking, content = extract_message_parts(accumulated)
-                content = strip_dsml_markup(content)
+                content = sanitize_thinking_for_user(strip_dsml_markup(content))
                 plan_blob = thinking + content
                 if content and not _looks_like_premature_completion(plan_blob):
                     yield {"type": "thinking", "token": "\n" + content.strip() + "\n\n"}
@@ -1025,7 +988,10 @@ def run_agent(raw_messages: list[dict[str, str]]) -> dict[str, str]:
     result, request_id = _invoke_agent(raw_messages, mode="chat")
     try:
         thinking, content = collect_agent_output(result["messages"])
-        return {"thinking": thinking, "reply": content}
+        return {
+            "thinking": sanitize_thinking_for_user(thinking),
+            "reply": content,
+        }
     finally:
         finish_request(request_id)
 

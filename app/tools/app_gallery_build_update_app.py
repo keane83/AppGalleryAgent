@@ -158,10 +158,10 @@ def build_and_upload_app_package(
     )
     _step(
         "获取 OBS 地址并上传 .app",
-        f"{upload_info.get('fileName')} · API {upload_info.get('uploadApiVersion', 'v2')}",
+        f"{upload_info.get('fileName')} · 上传完成",
     )
 
-    _step("登记软件包信息", "PUT /publish/v3/app-package-info", status="running")
+    _step("登记软件包信息", "正在登记到商店…", status="running")
     package_info = update_app_package_info(
         app_id=app_id,
         object_id=str(upload_info["objectId"]),
@@ -169,10 +169,7 @@ def build_and_upload_app_package(
         release_type=release_type,
         access_token=access_token,
     )
-    _step(
-        "登记软件包信息",
-        f"packageId={package_info.get('packageId')}；releasePhase=0",
-    )
+    _step("登记软件包信息", "软件包信息已登记")
 
     return {
         "appId": app_id,

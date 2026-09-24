@@ -285,7 +285,7 @@ def analyze_and_update_app_basic_info(
         release_phase=release_phase,
         access_token=access_token,
     )
-    _step("提交 app-info（分类/标签/负责人）", "PUT /publish/v3/app-info 成功")
+    _step("提交 app-info（分类/标签/负责人）", "已提交到商店")
     _step("提交 language-info（介绍/简介）", status="running")
     language_result = update_app_language_info(
         app_id=app_id,
@@ -294,7 +294,7 @@ def analyze_and_update_app_basic_info(
         release_phase=release_phase,
         access_token=access_token,
     )
-    _step("提交 language-info（介绍/简介）", "PUT /publish/v3/app-language-info 成功")
+    _step("提交 language-info（介绍/简介）", "文案已更新")
 
     privacy_label_result: dict[str, Any] | None = None
     if int(collect_person_info) == 0:
