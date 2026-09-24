@@ -28,7 +28,11 @@ def find_entry_ability(project_root: Path) -> Path:
 
 
 def is_patched(content: str) -> bool:
-    return PATCH_MARKER in content and "resolveLaunchPage" in content
+    return (
+        PATCH_MARKER in content
+        and "resolveLaunchPage" in content
+        and "this.launchWant = want" in content
+    )
 
 
 def _strip_bad_launch_want(content: str) -> str:
@@ -66,6 +70,22 @@ def apply_target_page_patch(source: Path, project_root: Path) -> tuple[str, Path
         patched = re.sub(
             r"(onCreate\(want: Want, launchParam: AbilityConstant\.LaunchParam\): void \{)",
             r"\1\n    super.onCreate(want, launchParam);",
+            patched,
+            count=1,
+        )
+
+    if "private launchWant" not in patched:
+        patched = re.sub(
+            r"(export default class \w+ extends UIAbility \{)",
+            r"\1\n  private launchWant: Want | null = null;",
+            patched,
+            count=1,
+        )
+
+    if "this.launchWant = want" not in patched:
+        patched = re.sub(
+            r"(onCreate\(want: Want, launchParam: AbilityConstant\.LaunchParam\): void \{)",
+            r"\1\n    this.launchWant = want;",
             patched,
             count=1,
         )

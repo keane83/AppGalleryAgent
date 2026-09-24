@@ -14,6 +14,26 @@ TARGET_ICON_SIZE = 1024
 
 _MEDIA_REF_RE = re.compile(r"\$media:([A-Za-z0-9_]+)")
 _ICON_FIELD_RE = re.compile(r'"icon"\s*:\s*"\$media:([A-Za-z0-9_]+)"')
+_START_WINDOW_ICON_RE = re.compile(
+    r'"startWindowIcon"\s*:\s*"\$media:([A-Za-z0-9_]+)"'
+)
+_APP_ICON_RE = re.compile(
+    r'"app"\s*:\s*\{[^}]*"icon"\s*:\s*"\$media:([A-Za-z0-9_]+)"',
+    re.S,
+)
+_IMAGE_SUFFIXES = (".png", ".webp", ".jpg", ".jpeg")
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for path in paths:
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+    return ordered
 
 
 def _media_png_candidates(ohos_root: Path, media_name: str) -> list[Path]:
@@ -23,18 +43,135 @@ def _media_png_candidates(ohos_root: Path, media_name: str) -> list[Path]:
         ohos_root / "AppScope/resources",
         ohos_root / "entry/src/main/resources",
     ):
-        if not resources_root.is_dir():
+        candidates.extend(_media_png_candidates_in_resources(resources_root, stems))
+    return _dedupe_paths(candidates)
+
+
+def _media_png_candidates_in_resources(
+    resources_root: Path,
+    media_names: set[str],
+) -> list[Path]:
+    candidates: list[Path] = []
+    if not resources_root.is_dir():
+        return candidates
+    for qualifier_dir in sorted(resources_root.iterdir()):
+        media_dir = qualifier_dir / "media"
+        if not media_dir.is_dir():
             continue
-        for qualifier_dir in resources_root.iterdir():
-            media_dir = qualifier_dir / "media"
-            if not media_dir.is_dir():
-                continue
-            for stem in stems:
-                for suffix in (".png", ".webp", ".jpg", ".jpeg"):
-                    path = media_dir / f"{stem}{suffix}"
-                    if path.is_file():
-                        candidates.append(path)
+        for stem in media_names:
+            for suffix in _IMAGE_SUFFIXES:
+                path = media_dir / f"{stem}{suffix}"
+                if path.is_file():
+                    candidates.append(path)
     return candidates
+
+
+def resolve_media_png_paths(
+    resources_root: Path,
+    media_name: str,
+    *,
+    visited: set[str] | None = None,
+) -> list[Path]:
+    """在指定 resources 根目录下解析 $media 引用，返回需替换的 PNG 路径列表。"""
+    visited = visited or set()
+    name = (media_name or "").strip()
+    if not name or name in visited:
+        return []
+    visited.add(name)
+
+    if not resources_root.is_dir():
+        return []
+
+    resolved: list[Path] = []
+    for qualifier_dir in sorted(resources_root.iterdir()):
+        media_dir = qualifier_dir / "media"
+        if not media_dir.is_dir():
+            continue
+
+        json_path = media_dir / f"{name}.json"
+        if json_path.is_file():
+            try:
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            layered = data.get("layered-image") or data.get("layered_image")
+            if isinstance(layered, dict):
+                for key in ("background", "foreground"):
+                    ref = str(layered.get(key) or "")
+                    match = _MEDIA_REF_RE.search(ref)
+                    if match:
+                        resolved.extend(
+                            resolve_media_png_paths(
+                                resources_root,
+                                match.group(1),
+                                visited=visited,
+                            )
+                        )
+            continue
+
+        for suffix in _IMAGE_SUFFIXES:
+            png_path = media_dir / f"{name}{suffix}"
+            if png_path.is_file():
+                resolved.append(png_path)
+                break
+
+    return _dedupe_paths(resolved)
+
+
+def discover_configured_icon_targets(ohos_root: Path | str) -> list[dict[str, Any]]:
+    """从 app.json5 / module.json5 的 icon 与 startWindowIcon 字段解析待替换 PNG。"""
+    ohos_root = Path(ohos_root).expanduser().resolve()
+    targets: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+
+    def _add(paths: list[Path], *, source: str, media_ref: str) -> None:
+        for path in paths:
+            key = str(path.resolve())
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            targets.append(
+                {
+                    "path": path,
+                    "source": source,
+                    "mediaRef": media_ref,
+                    "name": path.name,
+                }
+            )
+
+    app_json5 = ohos_root / "AppScope/app.json5"
+    if app_json5.is_file():
+        text = app_json5.read_text(encoding="utf-8", errors="ignore")
+        match = _APP_ICON_RE.search(text) or _ICON_FIELD_RE.search(text)
+        if match:
+            media_ref = match.group(1)
+            app_resources = ohos_root / "AppScope/resources"
+            _add(
+                resolve_media_png_paths(app_resources, media_ref),
+                source="AppScope/app.json5:icon",
+                media_ref=f"$media:{media_ref}",
+            )
+
+    for module_json5 in sorted(ohos_root.glob("**/src/main/module.json5")):
+        rel = module_json5.as_posix()
+        if any(part in rel for part in ("/ohosTest/", "/test/", "/mock/")):
+            continue
+        resources_root = module_json5.parent / "resources"
+        text = module_json5.read_text(encoding="utf-8", errors="ignore")
+        for media_ref in _ICON_FIELD_RE.findall(text):
+            _add(
+                resolve_media_png_paths(resources_root, media_ref),
+                source=f"{module_json5.relative_to(ohos_root).as_posix()}:icon",
+                media_ref=f"$media:{media_ref}",
+            )
+        for media_ref in _START_WINDOW_ICON_RE.findall(text):
+            _add(
+                resolve_media_png_paths(resources_root, media_ref),
+                source=f"{module_json5.relative_to(ohos_root).as_posix()}:startWindowIcon",
+                media_ref=f"$media:{media_ref}",
+            )
+
+    return targets
 
 
 def _read_layered_image_paths(ohos_root: Path) -> tuple[Path | None, Path | None]:

@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from dotenv import load_dotenv
 from langchain_core.tools import tool
 
 from app.config import _PROJECT_ROOT
+from app.tool_progress import report_tool_progress
 from app.tools.harmony_app_icon import export_app_icon_1024
 from app.tools.harmony_entry_ability_patch import ensure_entry_ability_patch
 from app.tools.harmony_flutter_patch import ensure_flutter_screenshot_patch
@@ -28,7 +30,8 @@ from app.tools.harmony_hdc import (
     WEBVIEW_RENDER_SETTLE_SEC,
     build_entry_hap,
     build_flutter_hap,
-    capture_screenshot_png,
+    WEBVIEW_POST_SCRIPT_WAIT_SEC,
+    capture_screenshot_png_with_retry,
     cold_start_and_wait,
     ensure_emulator_running,
     install_hap,
@@ -122,6 +125,7 @@ def _capture_native(
     bundle_name: str,
     shots: list[dict[str, object]],
     output_dir: Path,
+    progress_step: Callable[..., None] | None = None,
 ) -> list[dict[str, str]]:
     captured: list[dict[str, str]] = []
     for idx, item in enumerate(shots):
@@ -129,6 +133,12 @@ def _capture_native(
         slug = str(item["slug"])
         png_path = output_dir / str(item["outputFile"])
         logger.info("原生截图 %d/%d: %s", idx + 1, len(shots), slug)
+        if progress_step:
+            progress_step(
+                f"截图 {idx + 1}/{len(shots)}",
+                f"原生页面 {slug}",
+                status="running",
+            )
 
         cold_start_and_wait(
             bundle_name,
@@ -136,7 +146,7 @@ def _capture_native(
             render_settle_sec=PAGE_RENDER_SETTLE_SEC,
             extra_settle_sec=FIRST_SHOT_EXTRA_SETTLE_SEC if idx == 0 else 0.0,
         )
-        capture_screenshot_png(png_path)
+        capture_screenshot_png_with_retry(png_path)
 
         captured.append(
             {
@@ -147,6 +157,8 @@ def _capture_native(
                 "duplicated": "false",
             }
         )
+        if progress_step:
+            progress_step(f"截图 {idx + 1}/{len(shots)}", f"已保存 {png_path.name}")
     return captured
 
 
@@ -155,6 +167,7 @@ def _capture_webview(
     bundle_name: str,
     shots: list[dict[str, object]],
     output_dir: Path,
+    progress_step: Callable[..., None] | None = None,
 ) -> list[dict[str, str]]:
     captured: list[dict[str, str]] = []
     for idx, item in enumerate(shots):
@@ -164,19 +177,29 @@ def _capture_webview(
         png_path = output_dir / str(item["outputFile"])
 
         logger.info("WebView 截图 %d/%d: %s", idx + 1, len(shots), slug)
-        extra = float(item.get("waitSec") or 0)
+        if progress_step:
+            progress_step(
+                f"截图 {idx + 1}/{len(shots)}",
+                f"WebView {slug}",
+                status="running",
+            )
+        planned_wait = float(item.get("waitSec") or 0)
         if idx == 0:
-            extra = max(extra, WEBVIEW_FIRST_EXTRA_SETTLE_SEC)
+            planned_wait = max(planned_wait, WEBVIEW_FIRST_EXTRA_SETTLE_SEC, 6.0)
+        else:
+            planned_wait = max(planned_wait, 5.0)
         cold_start_and_wait(
             bundle_name,
             want_params={"scriptIdx": script_idx},
             render_settle_sec=WEBVIEW_RENDER_SETTLE_SEC,
-            extra_settle_sec=extra,
+            extra_settle_sec=planned_wait,
         )
+        if script.strip():
+            time.sleep(WEBVIEW_POST_SCRIPT_WAIT_SEC)
         if "decideBtn" in script:
             time.sleep(WEBVIEW_ACTION_EXTRA_WAIT_SEC)
 
-        capture_screenshot_png(png_path)
+        capture_screenshot_png_with_retry(png_path)
 
         captured.append(
             {
@@ -188,6 +211,8 @@ def _capture_webview(
                 "script": script,
             }
         )
+        if progress_step:
+            progress_step(f"截图 {idx + 1}/{len(shots)}", f"已保存 {png_path.name}")
     return captured
 
 
@@ -196,6 +221,7 @@ def _capture_flutter(
     bundle_name: str,
     shots: list[dict[str, object]],
     output_dir: Path,
+    progress_step: Callable[..., None] | None = None,
 ) -> list[dict[str, str]]:
     captured: list[dict[str, str]] = []
 
@@ -210,6 +236,12 @@ def _capture_flutter(
             tab_index,
             slug,
         )
+        if progress_step:
+            progress_step(
+                f"截图 {idx + 1}/{len(shots)}",
+                f"Flutter Tab {tab_index} ({slug})",
+                status="running",
+            )
 
         cold_start_and_wait(
             bundle_name,
@@ -220,7 +252,7 @@ def _capture_flutter(
             render_settle_sec=FLUTTER_RENDER_SETTLE_SEC,
             extra_settle_sec=FIRST_SHOT_EXTRA_SETTLE_SEC if idx == 0 else 0.0,
         )
-        capture_screenshot_png(png_path)
+        capture_screenshot_png_with_retry(png_path)
 
         captured.append(
             {
@@ -234,6 +266,8 @@ def _capture_flutter(
                 "md5": _file_md5(png_path),
             }
         )
+        if progress_step:
+            progress_step(f"截图 {idx + 1}/{len(shots)}", f"已保存 {png_path.name}")
 
     return captured
 
@@ -243,6 +277,13 @@ def capture_harmony_screenshots(
     *,
     rebuild: bool = True,
 ) -> dict[str, object]:
+    steps: list[dict[str, str]] = []
+
+    def _step(name: str, detail: str = "", *, status: str = "done") -> None:
+        steps.append({"step": name, "detail": detail, "status": status})
+        report_tool_progress(name, step=name, detail=detail, status=status)
+
+    _step("识别工程类型", status="running")
     resolved = resolve_project_paths(project_path)
     ohos_root = resolved["ohosRoot"]
     assert isinstance(ohos_root, Path)
@@ -252,7 +293,10 @@ def capture_harmony_screenshots(
     if flutter_root is not None and not isinstance(flutter_root, Path):
         flutter_root = None
 
+    _step("识别工程类型", f"{kind.value} · {project_path}")
+
     prep_started = time.time()
+    _step("启动模拟器 & 规划截图", "并行执行（模拟器启动 + LLM/启发式页面分析）", status="running")
     with ThreadPoolExecutor(max_workers=2) as pool:
         emulator_future = pool.submit(ensure_emulator_running)
         plan_future = pool.submit(plan_screenshots, project_path)
@@ -264,6 +308,15 @@ def capture_harmony_screenshots(
             time.time() - prep_started,
             plan.get("planSource", "native"),
         )
+    plan_source = str(plan.get("planSource") or "native")
+    shot_labels = [
+        f"{item.get('slug', item.get('page', '?'))}"
+        for item in (plan.get("screenshots") or [])[:3]
+    ]
+    _step(
+        "启动模拟器 & 规划截图",
+        f"设备={device}；规划来源={plan_source}；页面={', '.join(shot_labels) or '—'}",
+    )
 
     bundle_name = str(plan["bundleName"])
     app_name = str(plan.get("appName") or bundle_name)
@@ -277,6 +330,7 @@ def capture_harmony_screenshots(
     flutter_patch_info: dict[str, object] | None = None
 
     patch_started = time.time()
+    _step("注入截图 Patch", f"工程类型={kind.value}", status="running")
     if kind == ProjectKind.NATIVE_ARKTS:
         patch_info = ensure_entry_ability_patch(ohos_root)
     elif kind == ProjectKind.FLUTTER_OHOS:
@@ -294,11 +348,16 @@ def capture_harmony_screenshots(
         web_patch_info = ensure_webview_patches(ohos_root, list(scripts))
         patch_info = web_patch_info
     logger.info("工程 patch 完成，耗时 %.1fs", time.time() - patch_started)
+    _step(
+        "注入截图 Patch",
+        f"patched={patch_info.get('patched', False)}，耗时 {time.time() - patch_started:.1f}s",
+    )
 
     output_dir = _screenshot_output_dir(app_name=app_name)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     build_started = time.time()
+    _step("编译 HAP & 导出图标", "并行编译安装与 1024 图标导出", status="running")
     with ThreadPoolExecutor(max_workers=2) as pool:
         hap_future = pool.submit(
             _build_and_install,
@@ -317,18 +376,36 @@ def capture_harmony_screenshots(
         time.time() - build_started,
         icon_info.get("path"),
     )
+    _step(
+        "编译 HAP & 导出图标",
+        f"hap={hap_path or '复用已安装'}；图标={icon_info.get('path', '')}",
+    )
+
+    if hap_path is not None:
+        time.sleep(1.0)
 
     if kind == ProjectKind.WEBVIEW_HTML:
-        captured = _capture_webview(bundle_name=bundle_name, shots=shots, output_dir=output_dir)
+        captured = _capture_webview(
+            bundle_name=bundle_name,
+            shots=shots,
+            output_dir=output_dir,
+            progress_step=_step,
+        )
     elif kind == ProjectKind.FLUTTER_OHOS:
         assert flutter_root is not None
         captured = _capture_flutter(
             bundle_name=bundle_name,
             shots=shots,
             output_dir=output_dir,
+            progress_step=_step,
         )
     else:
-        captured = _capture_native(bundle_name=bundle_name, shots=shots, output_dir=output_dir)
+        captured = _capture_native(
+            bundle_name=bundle_name,
+            shots=shots,
+            output_dir=output_dir,
+            progress_step=_step,
+        )
 
     unique_count = len(captured)
     final_screenshots = (
@@ -354,6 +431,13 @@ def capture_harmony_screenshots(
         "screenshots": final_screenshots,
         "appIconPath": icon_info.get("path", ""),
         "appIcon": icon_info,
+        "steps": steps,
+        "planSource": plan_source,
+        "planSummary": {
+            "source": plan_source,
+            "pages": shot_labels,
+            "reasons": [str(item.get("reason", "")) for item in shots[:3]],
+        },
     }
 
 
@@ -382,9 +466,20 @@ def capture_harmony_screenshots_and_app_icon(projectPath: str) -> str:
     try:
         result = capture_harmony_screenshots(projectPath)
     except Exception as exc:
-        return f"Harmony 截图/图标失败: {exc}"
+        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
 
-    return json.dumps(result, ensure_ascii=False)
+    payload = {
+        "ok": True,
+        "outputDir": result.get("outputDir"),
+        "appIconPath": result.get("appIconPath"),
+        "screenshots": result.get("screenshots"),
+        "projectKind": result.get("projectKind"),
+        "appName": result.get("appName"),
+        "planSource": result.get("planSource"),
+        "planSummary": result.get("planSummary"),
+        "steps": result.get("steps"),
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 # 兼容旧工具名

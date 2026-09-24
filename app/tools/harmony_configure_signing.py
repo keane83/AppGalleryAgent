@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from langchain_core.tools import tool
 
 from app.config import _PROJECT_ROOT
+from app.tools.harmony_project_detect import resolve_project_paths
 from app.tools.harmony_signing_crypto import encrypt_signing_password, is_encrypted_password
 
 BUNDLE_NAME_RE = re.compile(
@@ -129,7 +130,9 @@ def _find_entry_string_json(project_root: Path) -> Path:
             return path
 
     raise ValueError(
-        "缺少 entry/src/main/resources/base/element/string.json"
+        "缺少 entry/src/main/resources/base/element/string.json。"
+        "Flutter OHOS 工程请传 Flutter 根目录（含 pubspec.yaml 与 ohos/）或 ohos 子目录，"
+        "不要只传不含 AppScope 的上层目录。"
     )
 
 
@@ -251,7 +254,17 @@ def configure_harmony_signing(
             f"bundleName 格式不正确：{bundle}（期望类似 com.example.app）"
         )
 
-    project_root = Path(project_path).expanduser().resolve()
+    resolved = resolve_project_paths(project_path)
+    ohos_root = resolved["ohosRoot"]
+    assert isinstance(ohos_root, Path)
+    input_path = resolved["inputPath"]
+    assert isinstance(input_path, Path)
+    project_kind = resolved["projectKind"]
+    flutter_root = resolved.get("flutterRoot")
+    if flutter_root is not None and not isinstance(flutter_root, Path):
+        flutter_root = None
+
+    project_root = ohos_root
     build_profile_path, app_json5_path, app_name_json_path, entry_name_json_path = (
         _validate_project_root(project_root)
     )
@@ -291,7 +304,10 @@ def configure_harmony_signing(
     env = _reload_signing_env()
     return {
         "ok": True,
-        "projectPath": str(build_profile_path.parent),
+        "projectPath": str(input_path),
+        "ohosRoot": str(ohos_root),
+        "flutterRoot": str(flutter_root) if flutter_root else "",
+        "projectKind": str(project_kind.value if hasattr(project_kind, "value") else project_kind),
         "bundleName": bundle,
         "appName": name,
         "updatedFiles": [
@@ -348,7 +364,8 @@ def configure_harmony_app_signing(
     storePassword / keyPassword 会从 .env 明文自动加密写入 build-profile。
 
     参数：
-    - projectPath: 鸿蒙工程根目录
+    - projectPath: 工程路径。原生/WebView 传 ohos 根（含 AppScope）；
+      Flutter OHOS 可传 Flutter 根目录（含 pubspec.yaml 与 ohos/）或 ohos 子目录
     - bundleName: 应用包名 / bundle id
     - profilePath: 本次使用的 .p7b 路径
     - appName: 应用显示名称

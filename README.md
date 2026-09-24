@@ -234,8 +234,9 @@ python -m app.tools.agc_browser_login
 | `projectPath` | string | 是 | 工程路径（ohos 根或 Flutter 根） |
 | `appId` | string | 是 | 应用 ID |
 | `release` | bool | 否 | 默认 `true`（Release 编译） |
-| `releaseType` | int | 否 | 默认 `1` |
-| `releasePhase` | int | 否 | 默认 `0` |
+| `releaseType` | int | 否 | 默认 `1`（全网） |
+
+**固定值**：登记软件包时 `releasePhase` 始终为 `0`（不可通过参数修改）。
 
 **流程**：编译 `.app` → 获取 OBS 上传地址 → 上传 → 登记软件包信息。
 

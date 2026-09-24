@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.agent import get_agent_info, run_agent, stream_agent
 from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from app.llm_factory import get_active_model_name, get_llm_public_info, is_api_provider, validate_llm_config
 from app.logging_config import setup_logging
 
 setup_logging()
@@ -53,22 +54,39 @@ async def index():
 
 @app.get("/api/health")
 async def health():
+    llm_info = get_llm_public_info()
+    config_error = validate_llm_config()
+    llm_ok = config_error is None
+
     ollama_ok = False
     ollama_error = None
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
-            ollama_ok = response.status_code == 200
-    except Exception as exc:
-        ollama_error = str(exc)
+    api_ok = False
+    api_error = None
+
+    if is_api_provider():
+        api_ok = llm_ok
+        api_error = config_error
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+                ollama_ok = response.status_code == 200
+        except Exception as exc:
+            ollama_error = str(exc)
+        llm_ok = ollama_ok
 
     return {
-        "status": "ok" if ollama_ok else "degraded",
+        "status": "ok" if llm_ok else "degraded",
+        "llm": llm_info,
         "ollama": {
             "reachable": ollama_ok,
             "base_url": OLLAMA_BASE_URL,
             "model": OLLAMA_MODEL,
             "error": ollama_error,
+        },
+        "api": {
+            "reachable": api_ok,
+            "error": api_error,
         },
         "agent": get_agent_info(),
     }
@@ -94,7 +112,7 @@ async def chat(request: ChatRequest):
     return ChatResponse(
         reply=result["reply"],
         thinking=result["thinking"],
-        model=OLLAMA_MODEL,
+        model=get_active_model_name(),
     )
 
 

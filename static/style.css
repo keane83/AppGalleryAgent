@@ -125,6 +125,63 @@ body {
   font-size: 0.92rem;
 }
 
+.tool-progress-block {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(110, 168, 254, 0.06);
+  border: 1px solid rgba(110, 168, 254, 0.22);
+}
+
+.tool-progress-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(110, 168, 254, 0.95);
+  margin-bottom: 8px;
+}
+
+.tool-progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tool-progress-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.tool-progress-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 6px;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+
+.tool-progress-item.is-running .tool-progress-dot {
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(110, 168, 254, 0.55);
+}
+
+.tool-progress-item.is-done .tool-progress-dot {
+  background: var(--success);
+}
+
+.tool-progress-title {
+  font-size: 0.88rem;
+  color: var(--text);
+}
+
+.tool-progress-detail {
+  margin-top: 2px;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
 .thinking-block {
   padding: 10px 12px;
   border-radius: 10px;

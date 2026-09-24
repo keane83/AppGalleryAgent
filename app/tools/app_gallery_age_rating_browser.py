@@ -55,13 +55,70 @@ _SELECT_ALL_NO_JS = """
 (scope) => {
   const root = scope || document;
   let clicked = 0;
+  const seen = new Set();
+
+  const labelText = (label) => {
+    const span = label.querySelector('.el-radio__label');
+    return (span?.textContent || label.textContent || '').replace(/\\s+/g, ' ').trim();
+  };
 
   const clickNoLabel = (label) => {
-    if (!label) return false;
+    if (!label || seen.has(label)) return false;
+    seen.add(label);
     const input = label.querySelector('input[type=radio], .el-radio__original');
     if (input && input.checked) return true;
     label.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     label.click?.();
+    if (input) {
+      input.checked = true;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    return true;
+  };
+
+  const containers = [
+    ...root.querySelectorAll('.question-wrap'),
+    ...root.querySelectorAll('.el-radio-group'),
+  ];
+  if (root.matches?.('.question-wrap, .el-radio-group')) containers.unshift(root);
+
+  for (const container of containers) {
+    let noLabel = null;
+    for (const label of container.querySelectorAll(
+      'label.single-select-radio, label.el-radio, .el-radio, label'
+    )) {
+      if (labelText(label) === '否') {
+        noLabel = label.closest('label') || label;
+        break;
+      }
+    }
+    if (clickNoLabel(noLabel)) clicked += 1;
+  }
+  return clicked;
+}
+"""
+
+_FIX_YES_TO_NO_JS = """
+(scope) => {
+  const root = scope || document;
+  let fixed = 0;
+
+  const labelText = (label) => {
+    const span = label.querySelector('.el-radio__label');
+    return (span?.textContent || label.textContent || '').replace(/\\s+/g, ' ').trim();
+  };
+
+  const isChecked = (label) => {
+    const input = label.querySelector('input[type=radio], .el-radio__original');
+    return !!(input && input.checked);
+  };
+
+  const clickLabel = (label) => {
+    if (!label) return false;
+    label.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    label.click?.();
+    const input = label.querySelector('input[type=radio], .el-radio__original');
     if (input) {
       input.checked = true;
       input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -69,26 +126,29 @@ _SELECT_ALL_NO_JS = """
     return true;
   };
 
-  for (const wrap of root.querySelectorAll('.question-wrap')) {
-    const label =
-      wrap.querySelector('label.single-select-radio input[value="1"]')?.closest('label.single-select-radio')
-      || [...wrap.querySelectorAll('label.single-select-radio')].find(
-        (el) => (el.textContent || '').trim() === '否'
-      );
-    if (clickNoLabel(label)) clicked += 1;
-  }
+  const containers = [
+    ...root.querySelectorAll('.question-wrap'),
+    ...root.querySelectorAll('.el-radio-group'),
+  ];
+  if (root.matches?.('.question-wrap, .el-radio-group')) containers.unshift(root);
 
-  for (const group of root.querySelectorAll('.el-radio-group')) {
-    for (const radio of group.querySelectorAll('.el-radio, label.el-radio')) {
-      const t = ((radio.querySelector('.el-radio__label') || radio).textContent || '').trim();
-      if (t !== '否') continue;
-      if (clickNoLabel(radio.closest('label') || radio)) {
-        clicked += 1;
-        break;
-      }
+  for (const container of containers) {
+    let yesLabel = null;
+    let noLabel = null;
+    for (const label of container.querySelectorAll(
+      'label.single-select-radio, label.el-radio, .el-radio, label'
+    )) {
+      const text = labelText(label);
+      const node = label.closest('label') || label;
+      if (text === '是') yesLabel = node;
+      if (text === '否') noLabel = node;
+    }
+    if (yesLabel && isChecked(yesLabel) && noLabel) {
+      clickLabel(noLabel);
+      fixed += 1;
     }
   }
-  return clicked;
+  return fixed;
 }
 """
 
@@ -542,11 +602,17 @@ def _wait_for_visible_question_wraps(page: Page, group: Locator, *, timeout_ms: 
 
 
 def _no_radio_in_question_wrap(wrap: Locator) -> Locator:
-    """AGC 问卷：否 = input[value='1'] 或文案「否」。"""
-    by_value = wrap.locator('label.single-select-radio:has(input[value="1"])').first
-    if by_value.count():
-        return by_value
-    return wrap.locator("label.single-select-radio").filter(has_text=re.compile(r"^否\s*$")).first
+    """AGC 问卷：仅按可见文案「否」定位，禁止用 input[value] 猜测（易误选「是」）。"""
+    candidates = [
+        wrap.locator("label.single-select-radio").filter(has_text=re.compile(r"^否\s*$")),
+        wrap.locator("label.el-radio").filter(has_text=re.compile(r"^否\s*$")),
+        wrap.locator(".el-radio").filter(has_text=re.compile(r"^否\s*$")),
+        wrap.get_by_role("radio", name="否"),
+    ]
+    for candidate in candidates:
+        if candidate.count():
+            return candidate.first
+    return wrap.locator("label").filter(has_text=re.compile(r"^否\s*$")).first
 
 
 def _select_no_in_agc_group(page: Page, group: Locator) -> int:
@@ -575,15 +641,25 @@ def _select_no_radios_in_scope(page: Page, scope: Locator) -> int:
     groups = scope.locator(".el-radio-group")
     for idx in range(groups.count()):
         group = groups.nth(idx)
-        no_radio = group.locator('label.single-select-radio:has(input[value="1"])').first
+        no_radio = group.get_by_role("radio", name="否")
         if not no_radio.count():
-            no_radio = group.get_by_role("radio", name="否")
+            no_radio = group.locator("label.single-select-radio").filter(
+                has_text=re.compile(r"^否\s*$")
+            )
         if not no_radio.count():
-            no_radio = group.locator(".el-radio").filter(has_text=re.compile(r"^否\s*$")).first
+            no_radio = group.locator(".el-radio").filter(has_text=re.compile(r"^否\s*$"))
         if no_radio.count() and _click_no_radio(page, no_radio.first):
             selected += 1
             page.wait_for_timeout(120)
     return selected
+
+
+def _fix_yes_selections(page: Page, scope: Locator) -> int:
+    """若误选了「是」，改点「否」。"""
+    try:
+        return int(scope.evaluate(_FIX_YES_TO_NO_JS) or 0)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _fill_questionnaire_all_no(page: Page, dlg: Locator) -> dict[str, int]:
@@ -611,9 +687,11 @@ def _fill_questionnaire_all_no(page: Page, dlg: Locator) -> dict[str, int]:
         _wait_for_visible_question_wraps(page, group, timeout_ms=5_000)
         picked = _select_no_in_agc_group(page, group)
         totals["selected"] += picked
+        totals["selected"] += _fix_yes_selections(page, group)
         page.wait_for_timeout(250)
 
     totals["selected"] += int(body.evaluate(_SELECT_ALL_NO_JS) or 0)
+    totals["selected"] += _fix_yes_selections(page, body)
 
     if totals["selected"] == 0:
         title = ""
@@ -638,6 +716,7 @@ def _click_verify_and_submit(page: Page, dlg: Locator) -> None:
     for _ in range(4):
         _select_no_radios_in_scope(page, body)
         body.evaluate(_SELECT_ALL_NO_JS)
+        _fix_yes_selections(page, body)
         page.wait_for_timeout(300)
 
     deadline = time.time() + 90
@@ -688,9 +767,11 @@ def _confirm_children_only_no(page: Page) -> None:
     body = _dialog_body(child_dialog)
     selected = _select_no_radios_in_scope(page, body)
     if not selected:
-        selected = body.evaluate(_SELECT_ALL_NO_JS)
+        selected = int(body.evaluate(_SELECT_ALL_NO_JS) or 0)
+    selected += _fix_yes_selections(page, body)
     if not selected:
         _click_dialog_button(child_dialog, "否", exact=False)
+    _fix_yes_selections(page, body)
     page.wait_for_timeout(200)
     _click_dialog_button(child_dialog, "确认")
     page.wait_for_timeout(800)

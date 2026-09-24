@@ -18,6 +18,7 @@ from app.config import (
     APP_GALLERY_DEFAULT_CONTACT_NAME,
     APP_GALLERY_DEFAULT_CONTACT_PHONE,
 )
+from app.tool_progress import report_tool_progress
 from app.tools.app_gallery_app_info_analyzer import (
     analyze_app_gallery_listing,
     format_analysis_summary,
@@ -227,8 +228,24 @@ def analyze_and_update_app_basic_info(
     preview_only: bool = False,
     access_token: str | None = None,
 ) -> dict[str, Any]:
+    steps: list[dict[str, str]] = []
+
+    def _step(name: str, detail: str = "", *, status: str = "done") -> None:
+        steps.append({"step": name, "detail": detail, "status": status})
+        report_tool_progress(name, step=name, detail=detail, status=status)
+
+    _step("分析工程并生成商店文案", status="running")
     analysis = analyze_app_gallery_listing(project_path)
+    analysis_steps = analysis.get("steps") or []
+    if isinstance(analysis_steps, list):
+        steps.extend(analysis_steps)
     summary = format_analysis_summary(analysis)
+    _step(
+        "分析工程并生成商店文案",
+        f"{analysis.get('categoryName')}/{analysis.get('tagName')}；"
+        f"介绍 {analysis.get('appDescLen', len(str(analysis.get('appDesc') or '')))} 字；"
+        f"简介 {analysis.get('briefInfoLen', len(str(analysis.get('briefInfo') or '')))} 字",
+    )
     app_info_body = build_app_info_update_body(
         analysis,
         lang=lang,
@@ -249,6 +266,7 @@ def analyze_and_update_app_basic_info(
             "collectPersonInfo": collect_person_info,
             "appInfoRequestBody": app_info_body,
             "languageInfoRequestBody": language_body,
+            "steps": steps,
         }
 
     logger.info(
@@ -258,6 +276,7 @@ def analyze_and_update_app_basic_info(
         app_info_body.get("kindMainTag"),
     )
 
+    _step("提交 app-info（分类/标签/负责人）", status="running")
     app_info_result = update_app_info(
         app_id=app_id,
         body=app_info_body,
@@ -266,6 +285,8 @@ def analyze_and_update_app_basic_info(
         release_phase=release_phase,
         access_token=access_token,
     )
+    _step("提交 app-info（分类/标签/负责人）", "PUT /publish/v3/app-info 成功")
+    _step("提交 language-info（介绍/简介）", status="running")
     language_result = update_app_language_info(
         app_id=app_id,
         body=language_body,
@@ -273,6 +294,7 @@ def analyze_and_update_app_basic_info(
         release_phase=release_phase,
         access_token=access_token,
     )
+    _step("提交 language-info（介绍/简介）", "PUT /publish/v3/app-language-info 成功")
 
     privacy_label_result: dict[str, Any] | None = None
     if int(collect_person_info) == 0:
@@ -280,10 +302,13 @@ def analyze_and_update_app_basic_info(
         bundle_name = str((analysis.get("context") or {}).get("bundleName") or "").strip()
         if app_name:
             try:
+                _step("浏览器设置隐私标签", "是否涉及个人信息收集=否", status="running")
                 from app.tools.app_gallery_privacy_tag_browser import set_privacy_tag_no_collect_sync
 
                 privacy_label_result = set_privacy_tag_no_collect_sync(app_name, bundle_name)
+                _step("浏览器设置隐私标签", "完成")
             except Exception as exc:
+                _step("浏览器设置隐私标签", f"失败: {exc}")
                 logger.warning("浏览器设置隐私标签「是否涉及个人信息收集=否」失败: %s", exc)
                 privacy_label_result = {"ok": False, "error": str(exc)}
 
@@ -298,6 +323,7 @@ def analyze_and_update_app_basic_info(
         "appInfoResult": app_info_result,
         "languageInfoResult": language_result,
         "privacyLabelBrowserResult": privacy_label_result,
+        "steps": steps,
     }
 
 
@@ -316,7 +342,10 @@ def _tool_response(result: dict[str, Any], *, preview_only: bool) -> str:
         "briefInfo": analysis.get("briefInfo"),
         "analysisSource": analysis.get("source"),
         "reason": analysis.get("reason"),
+        "appDescLen": analysis.get("appDescLen", len(str(analysis.get("appDesc") or ""))),
+        "briefInfoLen": analysis.get("briefInfoLen", len(str(analysis.get("briefInfo") or ""))),
         "collectPersonInfo": result.get("collectPersonInfo"),
+        "steps": result.get("steps") or analysis.get("steps"),
     }
     if preview_only:
         payload["appInfoRequestBody"] = result.get("appInfoRequestBody")
@@ -359,8 +388,8 @@ def update_app_gallery_app_basic_info(
     AI 自动分析 projectPath（默认 fast：关键词定分类 + 小 prompt 生成文案；见 APP_GALLERY_LISTING_ANALYSIS_MODE），生成并展示：
     1. 二级分类 harmonyChildType + 名称
     2. 标签 kindMainTag + 名称
-    3. 应用介绍 appDesc（500 字以内）
-    4. 一句话简介 briefInfo（15 字以内）
+    3. 应用介绍 appDesc（500 字以内，禁止 emoji/颜文字/装饰符号）
+    4. 一句话简介 briefInfo（15 字以内，禁止 emoji/颜文字/装饰符号）
 
     返回 JSON 中的 summary 字段为人类可读摘要；后台日志也会打印同样内容。
 

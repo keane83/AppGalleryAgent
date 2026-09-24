@@ -13,6 +13,8 @@ import httpx
 from dotenv import load_dotenv
 
 from app.config import (
+    LLM_API_BASE_URL,
+    LLM_API_KEY,
     OLLAMA_BASE_URL,
     OLLAMA_KEEP_ALIVE,
     OLLAMA_MODEL,
@@ -20,6 +22,7 @@ from app.config import (
     OLLAMA_TOOL_MODEL,
     _PROJECT_ROOT,
 )
+from app.llm_factory import get_active_model_name, is_api_provider, validate_llm_config
 
 logger = logging.getLogger("haa.llm_planner")
 
@@ -119,7 +122,7 @@ def collect_webview_context(ohos_root: Path, html_path: Path, index_ets: Path) -
     )
 
 
-def request_ollama_json(
+def request_llm_json(
     system: str,
     user: str,
     *,
@@ -127,7 +130,15 @@ def request_ollama_json(
     num_predict: int | None = None,
     timeout: float = 180.0,
 ) -> dict[str, Any]:
-    """调用本地 Ollama 并解析 JSON 响应。"""
+    """按 LLM_PROVIDER 调用 Ollama 或 DeepSeek API，并解析 JSON 响应。"""
+    if is_api_provider():
+        return _openai_compatible_json(
+            system,
+            user,
+            model=model,
+            num_predict=num_predict,
+            timeout=timeout,
+        )
     return _ollama_json(
         system,
         user,
@@ -137,6 +148,81 @@ def request_ollama_json(
     )
 
 
+def request_ollama_json(
+    system: str,
+    user: str,
+    *,
+    model: str | None = None,
+    num_predict: int | None = None,
+    timeout: float = 180.0,
+) -> dict[str, Any]:
+    """兼容旧名；实际走 request_llm_json。"""
+    return request_llm_json(
+        system,
+        user,
+        model=model,
+        num_predict=num_predict,
+        timeout=timeout,
+    )
+
+
+def _openai_compatible_json(
+    system: str,
+    user: str,
+    *,
+    model: str | None = None,
+    num_predict: int | None = None,
+    timeout: float = 180.0,
+) -> dict[str, Any]:
+    config_error = validate_llm_config()
+    if config_error:
+        raise ValueError(config_error)
+
+    model_name = model or get_active_model_name(for_tool=True)
+    payload: dict[str, Any] = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": min(OLLAMA_TEMPERATURE, 0.3),
+        "stream": False,
+    }
+    if num_predict is not None:
+        payload["max_tokens"] = num_predict
+
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    url = f"{LLM_API_BASE_URL.rstrip('/')}/chat/completions"
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    choices = data.get("choices") or []
+    if not choices:
+        raise ValueError(f"API 返回空 choices：{json.dumps(data, ensure_ascii=False)[:240]}")
+    message = choices[0].get("message") or {}
+    content = str(message.get("content") or "").strip()
+    if not content:
+        raise ValueError(
+            "API 返回空 content"
+            f"（finish_reason={choices[0].get('finish_reason')}）"
+        )
+
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"API 返回非 JSON 内容：{content[:240]}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"API JSON 根节点必须是 object：{type(parsed).__name__}")
+    return parsed
+
+
 def _ollama_json(
     system: str,
     user: str,
@@ -144,6 +230,7 @@ def _ollama_json(
     model: str | None = None,
     num_predict: int | None = None,
     timeout: float = 180.0,
+    think: bool = False,
 ) -> dict[str, Any]:
     options: dict[str, Any] = {"temperature": min(OLLAMA_TEMPERATURE, 0.3)}
     if num_predict is not None:
@@ -157,6 +244,7 @@ def _ollama_json(
         ],
         "stream": False,
         "format": "json",
+        "think": think,
         "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": options,
     }
@@ -164,8 +252,25 @@ def _ollama_json(
         resp = client.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
         resp.raise_for_status()
         data = resp.json()
-    content = (data.get("message") or {}).get("content") or "{}"
-    return json.loads(content)
+
+    message = data.get("message") or {}
+    content = str(message.get("content") or "").strip()
+    if not content:
+        done_reason = data.get("done_reason")
+        thinking_len = len(str(message.get("thinking") or ""))
+        raise ValueError(
+            "Ollama 返回空 content"
+            f"（done_reason={done_reason}, thinking_chars={thinking_len}）"
+        )
+
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Ollama 返回非 JSON 内容：{content[:240]}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Ollama JSON 根节点必须是 object：{type(parsed).__name__}")
+    return parsed
 
 
 def _slugify(label: str, fallback: str) -> str:

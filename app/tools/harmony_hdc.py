@@ -26,13 +26,16 @@ SCREENSHOT_HEIGHT = 1920
 DEVICE_BOOT_TIMEOUT_SEC = 180
 APP_FOREGROUND_TIMEOUT_SEC = 60
 APP_FOREGROUND_POLL_SEC = 0.35
-PAGE_RENDER_SETTLE_SEC = 1.2
-FLUTTER_RENDER_SETTLE_SEC = 2.5
-FIRST_SHOT_EXTRA_SETTLE_SEC = 1.5
+PAGE_RENDER_SETTLE_SEC = float(os.getenv("HARMONY_PAGE_RENDER_WAIT_SEC", "2.5"))
+FLUTTER_RENDER_SETTLE_SEC = float(os.getenv("HARMONY_FLUTTER_RENDER_WAIT_SEC", "3.5"))
+FIRST_SHOT_EXTRA_SETTLE_SEC = float(os.getenv("HARMONY_FIRST_SHOT_EXTRA_WAIT_SEC", "2.0"))
 FLUTTER_FIRST_EXTRA_SETTLE_SEC = FIRST_SHOT_EXTRA_SETTLE_SEC
-WEBVIEW_RENDER_SETTLE_SEC = float(os.getenv("HARMONY_WEBVIEW_RENDER_WAIT_SEC", "1.5"))
-WEBVIEW_FIRST_EXTRA_SETTLE_SEC = float(os.getenv("HARMONY_WEBVIEW_FIRST_EXTRA_WAIT_SEC", "2.5"))
-WEBVIEW_ACTION_EXTRA_WAIT_SEC = float(os.getenv("HARMONY_WEBVIEW_ACTION_EXTRA_WAIT_SEC", "1.0"))
+WEBVIEW_RENDER_SETTLE_SEC = float(os.getenv("HARMONY_WEBVIEW_RENDER_WAIT_SEC", "3.0"))
+WEBVIEW_FIRST_EXTRA_SETTLE_SEC = float(os.getenv("HARMONY_WEBVIEW_FIRST_EXTRA_WAIT_SEC", "4.0"))
+WEBVIEW_ACTION_EXTRA_WAIT_SEC = float(os.getenv("HARMONY_WEBVIEW_ACTION_EXTRA_WAIT_SEC", "1.5"))
+WEBVIEW_POST_SCRIPT_WAIT_SEC = float(os.getenv("HARMONY_WEBVIEW_POST_SCRIPT_WAIT_SEC", "2.5"))
+SCREENSHOT_BLANK_RETRY_DELAY_SEC = float(os.getenv("HARMONY_SCREENSHOT_BLANK_RETRY_DELAY_SEC", "2.5"))
+SCREENSHOT_BLANK_RETRY_MAX = int(os.getenv("HARMONY_SCREENSHOT_BLANK_RETRY_MAX", "3"))
 
 # 兼容旧引用
 PAGE_RENDER_WAIT_SEC = PAGE_RENDER_SETTLE_SEC
@@ -505,6 +508,32 @@ def jpeg_to_png(jpeg_path: Path, png_path: Path) -> None:
         raise RuntimeError(f"JPEG 转 PNG 失败: {proc.stdout} {proc.stderr}")
 
 
+def _is_mostly_blank_image(path: Path) -> bool:
+    """检测截图是否接近纯白/未渲染（低对比度空白）。"""
+    try:
+        from PIL import Image, ImageStat
+    except ImportError:
+        return False
+
+    if not path.is_file() or path.stat().st_size < 1024:
+        return True
+
+    img = Image.open(path).convert("RGB")
+    sample = img.resize((180, 320))
+    pixels = list(sample.getdata())
+    if not pixels:
+        return True
+
+    whiteish = sum(1 for r, g, b in pixels if r > 250 and g > 250 and b > 250)
+    if whiteish / len(pixels) > 0.88:
+        return True
+
+    stat = ImageStat.Stat(sample)
+    if max(stat.stddev) < 5.0:
+        return True
+    return False
+
+
 def capture_screenshot_png(output_png: Path) -> Path:
     logger.info("截屏 → %s", output_png.name)
     started = time.time()
@@ -514,6 +543,31 @@ def capture_screenshot_png(output_png: Path) -> Path:
     if tmp_jpeg.is_file():
         tmp_jpeg.unlink()
     logger.info("截屏完成 %.1fs: %s", time.time() - started, output_png.name)
+    return output_png
+
+
+def capture_screenshot_png_with_retry(output_png: Path) -> Path:
+    """截屏并在检测到空白图时延长等待后重试。"""
+    delay = SCREENSHOT_BLANK_RETRY_DELAY_SEC
+    attempts = max(1, SCREENSHOT_BLANK_RETRY_MAX)
+    for attempt in range(1, attempts + 1):
+        capture_screenshot_png(output_png)
+        if not _is_mostly_blank_image(output_png):
+            if attempt > 1:
+                logger.info("重试截屏成功（第 %d 次）: %s", attempt, output_png.name)
+            return output_png
+        if attempt >= attempts:
+            logger.warning("截屏仍偏空白，已用尽 %d 次重试: %s", attempts, output_png.name)
+            return output_png
+        logger.warning(
+            "截屏偏空白，%.1fs 后重试 (%d/%d): %s",
+            delay,
+            attempt + 1,
+            attempts,
+            output_png.name,
+        )
+        time.sleep(delay)
+        delay = min(delay * 1.5, 8.0)
     return output_png
 
 

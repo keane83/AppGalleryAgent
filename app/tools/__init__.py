@@ -16,6 +16,7 @@ from app.tools.harmony_capture_screenshots import (
     capture_harmony_screenshots_and_app_icon,
 )
 from app.tools.harmony_configure_signing import configure_harmony_app_signing
+from app.tools.harmony_replace_app_icon import replace_harmony_app_icon
 
 TOOLS = [
     get_app_gallery_access_token,
@@ -29,6 +30,7 @@ TOOLS = [
     update_app_gallery_build_update_app,
     configure_harmony_app_signing,
     capture_harmony_screenshots_and_app_icon,
+    replace_harmony_app_icon,
 ]
 
 __all__ = [
@@ -44,6 +46,7 @@ __all__ = [
     "capture_harmony_app_screenshots",
     "capture_harmony_screenshots_and_app_icon",
     "configure_harmony_app_signing",
+    "replace_harmony_app_icon",
     "get_app_gallery_access_token",
     "safe_tool_log_content",
 ]

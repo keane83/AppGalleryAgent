@@ -56,7 +56,18 @@ function createStreamingAssistantMessage() {
   const statusEl = document.createElement("div");
   statusEl.className = "answer-status";
   statusEl.textContent = "正在思考...";
-  node.appendChild(statusEl);
+
+  const toolProgressBlock = document.createElement("div");
+  toolProgressBlock.className = "tool-progress-block is-hidden";
+
+  const toolProgressLabel = document.createElement("div");
+  toolProgressLabel.className = "tool-progress-label";
+  toolProgressLabel.textContent = "工具执行进度";
+
+  const toolProgressList = document.createElement("div");
+  toolProgressList.className = "tool-progress-list";
+
+  toolProgressBlock.append(toolProgressLabel, toolProgressList);
 
   const thinkingBlock = document.createElement("div");
   thinkingBlock.className = "thinking-block is-hidden";
@@ -73,13 +84,18 @@ function createStreamingAssistantMessage() {
   const answerEl = document.createElement("div");
   answerEl.className = "answer-text is-hidden";
 
-  node.append(thinkingBlock, answerEl);
+  node.append(statusEl, thinkingBlock, toolProgressBlock, answerEl);
   chatEl.appendChild(node);
   chatEl.scrollTop = chatEl.scrollHeight;
 
   return {
     node,
     statusEl,
+    toolProgressBlock,
+    toolProgressLabel,
+    toolProgressList,
+    toolProgressKeys: new Map(),
+    activeToolName: "",
     thinkingBlock,
     thinkingText,
     answerEl,
@@ -88,13 +104,81 @@ function createStreamingAssistantMessage() {
   };
 }
 
+function beginToolProgressSession(state, toolName) {
+  state.activeToolName = toolName || "";
+  state.toolProgressKeys.clear();
+  state.toolProgressList.replaceChildren();
+  const label = toolName ? `工具执行进度 · ${toolName}` : "工具执行进度";
+  state.toolProgressLabel.textContent = label;
+  state.toolProgressBlock.classList.remove("is-hidden");
+  state.node.classList.remove("empty");
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function endToolProgressSession(state) {
+  state.activeToolName = "";
+  state.toolProgressKeys.clear();
+  state.toolProgressList.replaceChildren();
+  state.toolProgressBlock.classList.add("is-hidden");
+}
+
+function upsertToolProgress(state, data) {
+  if (!state.activeToolName) {
+    beginToolProgressSession(state, data.tool || "");
+  }
+
+  const stepKey = `${data.step || data.text || "step"}`;
+  let row = state.toolProgressKeys.get(stepKey);
+  if (!row) {
+    row = document.createElement("div");
+    row.className = "tool-progress-item";
+
+    const dot = document.createElement("span");
+    dot.className = "tool-progress-dot";
+
+    const body = document.createElement("div");
+    body.className = "tool-progress-body";
+
+    const title = document.createElement("div");
+    title.className = "tool-progress-title";
+    body.appendChild(title);
+
+    const detail = document.createElement("div");
+    detail.className = "tool-progress-detail is-hidden";
+    body.appendChild(detail);
+
+    row.append(dot, body);
+    state.toolProgressList.appendChild(row);
+    state.toolProgressKeys.set(stepKey, row);
+  }
+
+  const status = data.status || "running";
+  row.classList.toggle("is-running", status === "running");
+  row.classList.toggle("is-done", status !== "running");
+
+  const body = row.querySelector(".tool-progress-body");
+  const titleEl = body.querySelector(".tool-progress-title");
+  const detailEl = body.querySelector(".tool-progress-detail");
+  titleEl.textContent = data.text || data.step || "执行中…";
+  if (data.detail) {
+    detailEl.textContent = data.detail;
+    detailEl.classList.remove("is-hidden");
+  } else {
+    detailEl.textContent = "";
+    detailEl.classList.add("is-hidden");
+  }
+
+  state.node.classList.remove("empty");
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
 function updateStreamingAssistant(state) {
   const hasThinking = Boolean(state.thinking.trim());
   const hasReply = Boolean(state.reply.trim());
+  const hasActiveTool = Boolean(state.activeToolName);
 
-  if (hasThinking || hasReply) {
+  if (hasThinking || hasReply || hasActiveTool) {
     state.node.classList.remove("empty");
-    state.statusEl.classList.add("is-hidden");
   }
 
   if (hasThinking) {
@@ -105,9 +189,17 @@ function updateStreamingAssistant(state) {
   if (hasReply) {
     state.answerEl.classList.remove("is-hidden");
     state.answerEl.textContent = state.reply;
+  }
+
+  if (hasActiveTool) {
+    state.statusEl.classList.add("is-hidden");
+  } else if (hasReply) {
+    state.statusEl.classList.add("is-hidden");
   } else if (hasThinking) {
     state.statusEl.classList.remove("is-hidden");
     state.statusEl.textContent = "正在组织回答...";
+  } else {
+    state.statusEl.classList.remove("is-hidden");
   }
 
   chatEl.scrollTop = chatEl.scrollHeight;
@@ -180,6 +272,15 @@ async function sendMessage(text) {
         } else if (data.type === "status" && data.text) {
           streamState.statusEl.classList.remove("is-hidden");
           streamState.statusEl.textContent = data.text;
+        } else if (data.type === "tool_session") {
+          if (data.action === "start") {
+            beginToolProgressSession(streamState, data.tool || "");
+          } else if (data.action === "end") {
+            endToolProgressSession(streamState);
+          }
+          updateStreamingAssistant(streamState);
+        } else if (data.type === "tool_progress") {
+          upsertToolProgress(streamState, data);
         } else if (data.token) {
           streamState.reply += data.token;
         }
@@ -196,6 +297,7 @@ async function sendMessage(text) {
       messages.push({ role: "assistant", content: streamState.reply.trim() });
     }
   } catch (err) {
+    endToolProgressSession(streamState);
     streamState.node.classList.add("empty");
     streamState.statusEl.classList.remove("is-hidden");
     streamState.statusEl.textContent = `出错了：${err.message}`;
@@ -271,6 +373,7 @@ appendAssistantMessage(
 · 申请 Profile（.p7b 签名文件）— 需要：Profile 名称、appId
 · 在控制台「新建发布」— 需要：包名（浏览器操作，需先登录 AGC）
 · 配置工程签名 — 需要：工程路径、包名、Profile 路径、应用名
+· 替换工程内应用图标（可选）— 需要：工程路径、新 icon 路径（background/foreground/startIcon）
 · 截取商店截图 + 导出 1024 图标 — 需要：工程路径（建议传 ohos 目录）
 · 上传图标和截图到商店 — 需要：appId、截图/图标所在目录
 · 分析工程并更新商店信息（分类、介绍、简介；隐私标签默认设「否」）— 需要：appId、工程路径
@@ -280,12 +383,15 @@ appendAssistantMessage(
 
 【推荐上架顺序】
 
-创建 APP ID → 申请 Profile → 新建发布 → 配置签名 → 截图/图标 → 上传素材 → 更新基本信息 → 隐私协议 → 年龄分级 → 编译上传
+创建 APP ID → 申请 Profile → 新建发布 → 配置签名 →（可选换 icon）→ 截图/图标 → 上传素材 → 更新基本信息 → 隐私协议 → 年龄分级 → 编译上传
 
 【想一次性全流程？】
 
 你可以这样说：
 「帮我把应用【词汇日积月累】完整上架，包名 com.example.app，工程路径 /path/to/project，按推荐顺序执行。」
+
+若还要换工程内图标，加上 icon 路径即可（没说则不会换）：
+「…工程路径 /path/to/project，icon路径 /path/to/new_icon.png，按推荐顺序执行。」
 
 我会按顺序逐步完成；某步缺信息时会向你确认。
 

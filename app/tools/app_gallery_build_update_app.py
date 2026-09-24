@@ -11,6 +11,7 @@ import httpx
 from langchain_core.tools import tool
 
 from app.config import APP_GALLERY_API_BASE_URL
+from app.tool_progress import report_tool_progress
 from app.tools.app_gallery_auth import build_api_client_headers, resolve_api_auth
 from app.tools.app_gallery_upload import upload_publish_file
 from app.tools.harmony_hdc import build_entry_app, build_flutter_app
@@ -59,11 +60,14 @@ def update_app_package_info(
     object_id: str,
     file_name: str,
     release_type: int = 1,
-    release_phase: int = 0,
     access_token: str | None = None,
     timeout: float = 120.0,
 ) -> dict[str, Any]:
-    """PUT /publish/v3/app-package-info — 登记已上传的 .app 软件包。"""
+    """PUT /publish/v3/app-package-info — 登记已上传的 .app 软件包。
+
+    releasePhase 固定为 0（AGC 要求；勿与 releaseType=1 混淆）。
+    """
+    release_phase = 0
     aid = (app_id or "").strip()
     oid = (object_id or "").strip()
     name = (file_name or "").strip()
@@ -126,24 +130,48 @@ def build_and_upload_app_package(
     project_path: str,
     release: bool = True,
     release_type: int = 1,
-    release_phase: int = 0,
     access_token: str | None = None,
 ) -> dict[str, Any]:
+    steps: list[dict[str, str]] = []
+
+    def _step(name: str, detail: str = "", *, status: str = "done") -> None:
+        steps.append({"step": name, "detail": detail, "status": status})
+        report_tool_progress(name, step=name, detail=detail, status=status)
+
+    resolved = resolve_project_paths(project_path)
+    kind = resolved["projectKind"]
+    _step("识别工程类型", f"{kind.value} · {project_path}")
+    _step("编译 .app 包", f"release={release}（可能较久）", status="running")
     build_info = build_project_app_package(project_path, release=release)
     app_path = build_info["appPath"]
+    size_mb = int(build_info.get("contentLength") or 0) / (1024 * 1024)
+    _step(
+        "编译 .app 包",
+        f"{build_info.get('fileName')} · {size_mb:.1f} MB",
+    )
 
+    _step("获取 OBS 地址并上传 .app", f"约 {size_mb:.1f} MB，请稍候", status="running")
     upload_info = upload_publish_file(
         app_id=app_id,
         file_path=app_path,
         access_token=access_token,
     )
+    _step(
+        "获取 OBS 地址并上传 .app",
+        f"{upload_info.get('fileName')} · API {upload_info.get('uploadApiVersion', 'v2')}",
+    )
+
+    _step("登记软件包信息", "PUT /publish/v3/app-package-info", status="running")
     package_info = update_app_package_info(
         app_id=app_id,
         object_id=str(upload_info["objectId"]),
         file_name=str(upload_info["fileName"]),
         release_type=release_type,
-        release_phase=release_phase,
         access_token=access_token,
+    )
+    _step(
+        "登记软件包信息",
+        f"packageId={package_info.get('packageId')}；releasePhase=0",
     )
 
     return {
@@ -152,6 +180,7 @@ def build_and_upload_app_package(
         "build": build_info,
         "upload": upload_info,
         "packageInfo": package_info,
+        "steps": steps,
     }
 
 
@@ -161,7 +190,6 @@ def update_app_gallery_build_update_app(
     appId: str,
     release: bool = True,
     releaseType: int = 1,
-    releasePhase: int = 0,
 ) -> str:
     """编译 HarmonyOS 工程并上传 .app 软件包到 AppGallery Connect。
 
@@ -169,11 +197,12 @@ def update_app_gallery_build_update_app(
     1. 识别工程类型并编译 .app（原生/WebView：`hvigorw assembleApp`；Flutter：`flutter build app`）
     2. GET /publish/v2/upload-url/for-obs 获取 OBS 上传地址（fileType=APP）
     3. PUT 上传 .app 到 OBS
-    4. PUT /publish/v3/app-package-info 登记软件包
+    4. PUT /publish/v3/app-package-info 登记软件包（releasePhase 固定为 0）
 
     参数：
     - projectPath: 鸿蒙工程路径（ohos 根目录或 Flutter 工程根目录）
     - appId: AppGallery 应用 ID
+    - releaseType: 默认 1（全网）；releasePhase 不由参数控制，始终为 0
 
     上传完成后 AGC 需约 2 分钟解析软件包，再提交审核。
     工程须已配置发布签名（可先调用 configure_harmony_app_signing）。
@@ -184,11 +213,10 @@ def update_app_gallery_build_update_app(
             project_path=projectPath,
             release=release,
             release_type=releaseType,
-            release_phase=releasePhase,
         )
     except Exception as exc:
         logger.exception("编译并上传 APP 包失败")
-        return f"编译并上传 APP 包失败: {exc}"
+        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
 
     build = result.get("build") or {}
     upload = result.get("upload") or {}
@@ -205,5 +233,7 @@ def update_app_gallery_build_update_app(
         "objectId": upload.get("objectId"),
         "packageId": package.get("packageId"),
         "uploadApiVersion": upload.get("uploadApiVersion"),
+        "releasePhase": package.get("releasePhase", 0),
+        "steps": result.get("steps"),
     }
     return json.dumps(payload, ensure_ascii=False)

@@ -2,14 +2,64 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
+# 自动分析/上架时禁止选用的标签（勿自动选择）
+FORBIDDEN_AUTO_TAG_IDS: frozenset[int] = frozenset({15000007, 15000001})  # AI、浏览器
+FORBIDDEN_AUTO_TAG_NAMES: frozenset[str] = frozenset({"AI", "浏览器"})
+_DEFAULT_SAFE_TAG_ID = 15000005  # 工具 / 工具（无合适匹配时的兜底）
+_DEFAULT_SAFE_CATEGORY_ID = 10000000
+
 CATEGORY_TAG_ENTRIES: list[dict[str, Any]] = [{'category': '工具', 'secondCategoryId': 10000000, 'tag': '浏览器', 'tagId': 15000001}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '输入法', 'tagId': 15000002}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '闹钟', 'tagId': 15000003}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '安全性能', 'tagId': 15000004}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '工具', 'tagId': 15000005}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': 'Wi-Fi', 'tagId': 15000006}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': 'AI', 'tagId': 15000007}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': 'AI写作', 'tagId': 15000008}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '深度合成', 'tagId': 15000009}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '手电筒', 'tagId': 15000010}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '计算器', 'tagId': 15000011}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '遥控器', 'tagId': 15000012}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '网盘', 'tagId': 15000013}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '扫描仪', 'tagId': 15000014}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '镜子', 'tagId': 15000015}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '虚拟现实', 'tagId': 15000016}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '备忘录', 'tagId': 15000017}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '通讯', 'tagId': 15000018}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '智能家居', 'tagId': 15000019}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '播放器', 'tagId': 15000020}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '加速器', 'tagId': 15000021}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '文件共享', 'tagId': 15000022}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '投屏', 'tagId': 15000023}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '手账', 'tagId': 15000024}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '解压', 'tagId': 15000025}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '录音', 'tagId': 15000026}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '指南针', 'tagId': 15000027}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '测量仪', 'tagId': 15000028}, {'category': '工具', 'secondCategoryId': 10000000, 'tag': '写作', 'tagId': 15000029}, {'category': '商务', 'secondCategoryId': 10000001, 'tag': '办公软件', 'tagId': 15000030}, {'category': '商务', 'secondCategoryId': 10000001, 'tag': '笔记', 'tagId': 15000031}, {'category': '商务', 'secondCategoryId': 10000001, 'tag': '邮箱', 'tagId': 15000032}, {'category': '商务', 'secondCategoryId': 10000001, 'tag': '求职招聘', 'tagId': 15000033}, {'category': '商务', 'secondCategoryId': 10000001, 'tag': '企业服务', 'tagId': 15000034}, {'category': '商务', 'secondCategoryId': 10000001, 'tag': '会议', 'tagId': 15000035}, {'category': '商务', 'secondCategoryId': 10000001, 'tag': '商标代理', 'tagId': 15000036}, {'category': '商务', 'secondCategoryId': 10000001, 'tag': '法律服务', 'tagId': 15000037}, {'category': '商务', 'secondCategoryId': 10000001, 'tag': '时间管理', 'tagId': 15000038}, {'category': '效率', 'secondCategoryId': 10000002, 'tag': '日程清单', 'tagId': 15000039}, {'category': '效率', 'secondCategoryId': 10000002, 'tag': '思维导图', 'tagId': 15000040}, {'category': '效率', 'secondCategoryId': 10000002, 'tag': '专注', 'tagId': 15000041}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '股票', 'tagId': 15000042}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '基金', 'tagId': 15000043}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '股票行情', 'tagId': 15000044}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '银行', 'tagId': 15000045}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '贷款', 'tagId': 15000046}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '理财', 'tagId': 15000047}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '记账', 'tagId': 15000048}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '发票', 'tagId': 15000049}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '保险', 'tagId': 15000050}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '移动支付', 'tagId': 15000051}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '期货', 'tagId': 15000052}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '证券', 'tagId': 15000053}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '证券投资咨询', 'tagId': 15000054}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '信用卡', 'tagId': 15000055}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '金融理财资讯', 'tagId': 15000056}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '金融辅助工具', 'tagId': 15000057}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '境外金融服务', 'tagId': 15000058}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '境外贵金属', 'tagId': 15000059}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '境外证券服务', 'tagId': 15000060}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '贵金属', 'tagId': 15000061}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '外汇', 'tagId': 15000062}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '信托', 'tagId': 15000063}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '融资租赁', 'tagId': 15000064}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '汽车金融', 'tagId': 15000065}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '资产管理与交易', 'tagId': 15000066}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '消费金融', 'tagId': 15000067}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '征信机构', 'tagId': 15000068}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '商业保理', 'tagId': 15000069}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '典当', 'tagId': 15000070}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '贷款平台', 'tagId': 15000071}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '融资担保', 'tagId': 15000072}, {'category': '金融理财', 'secondCategoryId': 10000003, 'tag': '金融逾期服务', 'tagId': 15000073}, {'category': '教育', 'secondCategoryId': 10000004, 'tag': '英文', 'tagId': 15000074}, {'category': '教育', 'secondCategoryId': 10000004, 'tag': '学习', 'tagId': 15000075}, {'category': '教育', 'secondCategoryId': 10000004, 'tag': '翻译', 'tagId': 15000076}, {'category': '教育', 'secondCategoryId': 10000004, 'tag': '备考', 'tagId': 15000077}, {'category': '教育', 'secondCategoryId': 10000004, 'tag': '语言学习', 'tagId': 15000078}, {'category': '教育', 'secondCategoryId': 10000004, 'tag': '公考', 'tagId': 15000079}, {'category': '教育', 'secondCategoryId': 10000004, 'tag': '成人教育', 'tagId': 15000080}, {'category': '教育', 'secondCategoryId': 10000004, 'tag': 'K12学科培训', 'tagId': 15000081}, {'category': '教育', 'secondCategoryId': 10000004, 'tag': '出国留学', 'tagId': 15000082}, {'category': '教育', 'secondCategoryId': 10000004, 'tag': '大学', 'tagId': 15000083}, {'category': '儿童', 'secondCategoryId': 10000005, 'tag': '早教', 'tagId': 15000084}, {'category': '儿童', 'secondCategoryId': 10000005, 'tag': '儿歌', 'tagId': 15000085}, {'category': '新闻', 'secondCategoryId': 10000006, 'tag': '新闻', 'tagId': 15000086}, {'category': '资讯', 'secondCategoryId': 10000007, 'tag': '分类信息', 'tagId': 15000087}, {'category': '阅读与工具书', 'secondCategoryId': 10000008, 'tag': '电子书', 'tagId': 15000088}, {'category': '阅读与工具书', 'secondCategoryId': 10000008, 'tag': '动漫', 'tagId': 15000089}, {'category': '阅读与工具书', 'secondCategoryId': 10000008, 'tag': '有声读物', 'tagId': 15000090}, {'category': '阅读与工具书', 'secondCategoryId': 10000008, 'tag': '杂志', 'tagId': 15000091}, {'category': '阅读与工具书', 'secondCategoryId': 10000008, 'tag': '幽默', 'tagId': 15000092}, {'category': '阅读与工具书', 'secondCategoryId': 10000008, 'tag': '小说', 'tagId': 15000093}, {'category': '阅读与工具书', 'secondCategoryId': 10000008, 'tag': '实体剧本售卖', 'tagId': 15000094}, {'category': '体育', 'secondCategoryId': 10000009, 'tag': '赛事', 'tagId': 15000095}, {'category': '体育', 'secondCategoryId': 10000009, 'tag': '体育社区', 'tagId': 15000096}, {'category': '体育', 'secondCategoryId': 10000009, 'tag': '运动指导', 'tagId': 15000097}, {'category': '体育', 'secondCategoryId': 10000009, 'tag': '体育资讯', 'tagId': 15000098}, {'category': '汽车', 'secondCategoryId': 10000010, 'tag': '养车', 'tagId': 15000099}, {'category': '汽车', 'secondCategoryId': 10000010, 'tag': '车驾管服务', 'tagId': 15000100}, {'category': '汽车', 'secondCategoryId': 10000010, 'tag': '汽车资讯', 'tagId': 15000101}, {'category': '汽车', 'secondCategoryId': 10000010, 'tag': '驾考', 'tagId': 15000102}, {'category': '汽车', 'secondCategoryId': 10000010, 'tag': '购车', 'tagId': 15000103}, {'category': '汽车', 'secondCategoryId': 10000010, 'tag': '车友社区', 'tagId': 15000104}, {'category': '汽车', 'secondCategoryId': 10000010, 'tag': '二手车', 'tagId': 15000105}, {'category': '汽车', 'secondCategoryId': 10000010, 'tag': '加油充电', 'tagId': 15000106}, {'category': '汽车', 'secondCategoryId': 10000010, 'tag': '车辆服务', 'tagId': 15000107}, {'category': '医疗', 'secondCategoryId': 10000011, 'tag': '门诊预约', 'tagId': 15000108}, {'category': '医疗', 'secondCategoryId': 10000011, 'tag': '医美', 'tagId': 15000109}, {'category': '医疗', 'secondCategoryId': 10000011, 'tag': '医疗服务', 'tagId': 15000110}, {'category': '医疗', 'secondCategoryId': 10000011, 'tag': '医院', 'tagId': 15000111}, {'category': '医疗', 'secondCategoryId': 10000011, 'tag': '中医', 'tagId': 15000112}, {'category': '医疗', 'secondCategoryId': 10000011, 'tag': '药品', 'tagId': 15000113}, {'category': '医疗', 'secondCategoryId': 10000011, 'tag': '医疗器械', 'tagId': 15000114}, {'category': '医疗', 'secondCategoryId': 10000011, 'tag': '基因检测', 'tagId': 15000115}, {'category': '医疗', 'secondCategoryId': 10000011, 'tag': '体检', 'tagId': 15000116}, {'category': '运动健康', 'secondCategoryId': 10000012, 'tag': '养生', 'tagId': 15000117}, {'category': '运动健康', 'secondCategoryId': 10000012, 'tag': '运动', 'tagId': 15000118}, {'category': '运动健康', 'secondCategoryId': 10000012, 'tag': '健康', 'tagId': 15000119}, {'category': '运动健康', 'secondCategoryId': 10000012, 'tag': '女性健康', 'tagId': 15000120}, {'category': '运动健康', 'secondCategoryId': 10000012, 'tag': '助眠', 'tagId': 15000121}, {'category': '运动健康', 'secondCategoryId': 10000012, 'tag': '健康管理', 'tagId': 15000122}, {'category': '运动健康', 'secondCategoryId': 10000012, 'tag': '计步', 'tagId': 15000123}, {'category': '运动健康', 'secondCategoryId': 10000012, 'tag': '母婴', 'tagId': 15000124}, {'category': '影视与直播', 'secondCategoryId': 10000013, 'tag': '视频', 'tagId': 15000125}, {'category': '影视与直播', 'secondCategoryId': 10000013, 'tag': '短视频', 'tagId': 15000126}, {'category': '影视与直播', 'secondCategoryId': 10000013, 'tag': '微短剧', 'tagId': 15000127}, {'category': '影视与直播', 'secondCategoryId': 10000013, 'tag': '直播', 'tagId': 15000128}, {'category': '音乐', 'secondCategoryId': 10000014, 'tag': '音乐', 'tagId': 15000129}, {'category': '音乐', 'secondCategoryId': 10000014, 'tag': 'K歌', 'tagId': 15000130}, {'category': '音乐', 'secondCategoryId': 10000014, 'tag': '电台', 'tagId': 15000131}, {'category': '音乐', 'secondCategoryId': 10000014, 'tag': '乐器', 'tagId': 15000132}, {'category': '休闲娱乐', 'secondCategoryId': 10000015, 'tag': '休闲益智', 'tagId': 15000133}, {'category': '休闲娱乐', 'secondCategoryId': 10000015, 'tag': '游戏辅助', 'tagId': 15000134}, {'category': '休闲娱乐', 'secondCategoryId': 10000015, 'tag': '交易服务', 'tagId': 15000135}, {'category': '休闲娱乐', 'secondCategoryId': 10000015, 'tag': '社交聚会', 'tagId': 15000136}, {'category': '休闲娱乐', 'secondCategoryId': 10000015, 'tag': '演出票务', 'tagId': 15000137}, {'category': '休闲娱乐', 'secondCategoryId': 10000015, 'tag': '电影票', 'tagId': 15000138}, {'category': '社交', 'secondCategoryId': 10000016, 'tag': '聊天', 'tagId': 15000139}, {'category': '社交', 'secondCategoryId': 10000016, 'tag': '社区', 'tagId': 15000140}, {'category': '社交', 'secondCategoryId': 10000016, 'tag': '婚恋', 'tagId': 15000141}, {'category': '社交', 'secondCategoryId': 10000016, 'tag': '通讯', 'tagId': 15000142}, {'category': '社交', 'secondCategoryId': 10000016, 'tag': '交友', 'tagId': 15000143}, {'category': '社交', 'secondCategoryId': 10000016, 'tag': 'AI交友', 'tagId': 15000144}, {'category': '社交', 'secondCategoryId': 10000016, 'tag': '表情包', 'tagId': 15000145}, {'category': '社交', 'secondCategoryId': 10000016, 'tag': '网络用语', 'tagId': 15000146}, {'category': '社交', 'secondCategoryId': 10000016, 'tag': '头像', 'tagId': 15000147}, {'category': '社交', 'secondCategoryId': 10000016, 'tag': '分享生活', 'tagId': 15000148}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '拍照', 'tagId': 15000149}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '图像美化', 'tagId': 15000150}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '影音编辑', 'tagId': 15000151}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '相册图库', 'tagId': 15000152}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '相机', 'tagId': 15000153}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '剪辑', 'tagId': 15000154}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '拍摄美化', 'tagId': 15000155}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '水印', 'tagId': 15000156}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '拼图', 'tagId': 15000157}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '人像拍摄', 'tagId': 15000158}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '胶片拍摄', 'tagId': 15000159}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '特效拍摄', 'tagId': 15000160}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': 'AI剪辑', 'tagId': 15000161}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': 'AI作图', 'tagId': 15000162}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '专业拍摄', 'tagId': 15000163}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '拍摄分享', 'tagId': 15000164}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '航拍', 'tagId': 15000165}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '识图', 'tagId': 15000166}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '证件照', 'tagId': 15000167}, {'category': '拍摄美化', 'secondCategoryId': 10000017, 'tag': '图片修复', 'tagId': 15000168}, {'category': '艺术与设计', 'secondCategoryId': 10000018, 'tag': '绘画', 'tagId': 15000169}, {'category': '艺术与设计', 'secondCategoryId': 10000018, 'tag': '设计', 'tagId': 15000170}, {'category': '艺术与设计', 'secondCategoryId': 10000018, 'tag': '涂色', 'tagId': 15000171}, {'category': '艺术与设计', 'secondCategoryId': 10000018, 'tag': '海报', 'tagId': 15000172}, {'category': '艺术与设计', 'secondCategoryId': 10000018, 'tag': '请柬设计', 'tagId': 15000173}, {'category': '艺术与设计', 'secondCategoryId': 10000018, 'tag': '头像表情', 'tagId': 15000174}, {'category': '艺术与设计', 'secondCategoryId': 10000018, 'tag': '家居设计', 'tagId': 15000175}, {'category': '艺术与设计', 'secondCategoryId': 10000018, 'tag': '设计学习', 'tagId': 15000176}, {'category': '艺术与设计', 'secondCategoryId': 10000018, 'tag': '营销宣传', 'tagId': 15000177}, {'category': '主题', 'secondCategoryId': 10000019, 'tag': '铃声', 'tagId': 15000178}, {'category': '主题', 'secondCategoryId': 10000019, 'tag': '锁屏', 'tagId': 15000179}, {'category': '主题', 'secondCategoryId': 10000019, 'tag': '壁纸', 'tagId': 15000180}, {'category': '主题', 'secondCategoryId': 10000019, 'tag': '个性', 'tagId': 15000181}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '家政', 'tagId': 15000182}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '本地生活', 'tagId': 15000183}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '天气', 'tagId': 15000184}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '日历', 'tagId': 15000185}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '星座', 'tagId': 15000186}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '彩票资讯', 'tagId': 15000187}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '时尚', 'tagId': 15000188}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '美妆', 'tagId': 15000189}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '造型', 'tagId': 15000190}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '跑腿', 'tagId': 15000191}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '宠物', 'tagId': 15000192}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '生活缴费', 'tagId': 15000193}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '公共服务', 'tagId': 15000194}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '政务民生', 'tagId': 15000195}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '话费充值', 'tagId': 15000196}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '众筹', 'tagId': 15000197}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '慈善募捐', 'tagId': 15000198}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '宗教', 'tagId': 15000199}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '开锁换锁', 'tagId': 15000200}, {'category': '生活服务', 'secondCategoryId': 10000020, 'tag': '公益', 'tagId': 15000201}, {'category': '房产与装修', 'secondCategoryId': 10000021, 'tag': '租房买房', 'tagId': 15000202}, {'category': '房产与装修', 'secondCategoryId': 10000021, 'tag': '家居装修', 'tagId': 15000203}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '商城', 'tagId': 15000204}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '导购', 'tagId': 15000205}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '团购', 'tagId': 15000206}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '海淘', 'tagId': 15000207}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '快递', 'tagId': 15000208}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '优惠', 'tagId': 15000209}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '种草', 'tagId': 15000210}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '比价', 'tagId': 15000211}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '拍卖', 'tagId': 15000212}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '二手商城', 'tagId': 15000213}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '衣物回收', 'tagId': 15000214}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '社区团购', 'tagId': 15000215}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '商家管理', 'tagId': 15000216}, {'category': '购物', 'secondCategoryId': 10000022, 'tag': '数字藏品', 'tagId': 15000217}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '菜谱', 'tagId': 15000218}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '外卖', 'tagId': 15000219}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '生鲜', 'tagId': 15000220}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '饮食', 'tagId': 15000221}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '快餐', 'tagId': 15000222}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '中餐', 'tagId': 15000223}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '轻食', 'tagId': 15000224}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '烘焙', 'tagId': 15000225}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '咖啡', 'tagId': 15000226}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '饮料', 'tagId': 15000227}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '食谱', 'tagId': 15000228}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '餐馆', 'tagId': 15000229}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '美食攻略', 'tagId': 15000230}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '点餐', 'tagId': 15000231}, {'category': '美食', 'secondCategoryId': 10000023, 'tag': '商家', 'tagId': 15000232}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '旅游', 'tagId': 15000233}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '住宿', 'tagId': 15000234}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '行程助手', 'tagId': 15000235}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '自驾游', 'tagId': 15000236}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '出境旅游', 'tagId': 15000237}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '亲子旅游', 'tagId': 15000238}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '酒店', 'tagId': 15000239}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '民宿', 'tagId': 15000240}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '度假村', 'tagId': 15000241}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '游乐场', 'tagId': 15000242}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '主题公园', 'tagId': 15000243}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '景区服务', 'tagId': 15000244}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '旅游攻略', 'tagId': 15000245}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '旅游企业', 'tagId': 15000246}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '行程记录', 'tagId': 15000247}, {'category': '旅游', 'secondCategoryId': 10000024, 'tag': '出门防护', 'tagId': 15000248}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '地图服务', 'tagId': 15000249}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '导航', 'tagId': 15000250}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '交通票务', 'tagId': 15000251}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '用车', 'tagId': 15000252}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '公交地铁', 'tagId': 15000253}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '网约车', 'tagId': 15000254}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '出租车', 'tagId': 15000255}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '顺风车', 'tagId': 15000256}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '代驾', 'tagId': 15000257}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '拼车', 'tagId': 15000258}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '租车', 'tagId': 15000259}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '航空', 'tagId': 15000260}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '公共交通', 'tagId': 15000261}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '检测定位', 'tagId': 15000262}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '充电服务', 'tagId': 15000263}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '高速服务', 'tagId': 15000264}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '加油站服务', 'tagId': 15000265}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '交通急救服务', 'tagId': 15000266}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '客运', 'tagId': 15000267}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '水运', 'tagId': 15000268}, {'category': '出行导航', 'secondCategoryId': 10000025, 'tag': '货运', 'tagId': 15000269}]
+
+def is_forbidden_auto_tag(*, tag_id: int | None = None, tag_name: str | None = None) -> bool:
+    if tag_id is not None and int(tag_id) in FORBIDDEN_AUTO_TAG_IDS:
+        return True
+    if tag_name is not None and str(tag_name).strip() in FORBIDDEN_AUTO_TAG_NAMES:
+        return True
+    return False
+
+
+def _iter_selectable_entries(*, max_lines: int | None = None) -> list[dict[str, Any]]:
+    items = [
+        item
+        for item in CATEGORY_TAG_ENTRIES
+        if not is_forbidden_auto_tag(tag_id=int(item["tagId"]), tag_name=str(item["tag"]))
+    ]
+    if max_lines is not None:
+        return items[:max_lines]
+    return items
+
+
+def _tag_matches_blob(tag: str, blob: str) -> bool:
+    """标签与工程文本匹配；短英文标签用词边界，避免 AI 误匹配 main/email。"""
+    tag_l = tag.lower()
+    if len(tag) <= 3 and tag.isascii():
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(tag_l)}(?![a-z0-9])", blob))
+    return tag_l in blob
+
+
+def get_default_tool_tag_entry() -> dict[str, Any]:
+    """无合适标签时的兜底：工具 / 工具。"""
+    entry = find_entry_by_tag_id(_DEFAULT_SAFE_TAG_ID)
+    if entry is None:
+        raise ValueError("默认标签「工具」(kindMainTag=15000005) 未找到")
+    return entry
+
+
+def ensure_allowed_auto_tag(second_category_id: int, tag_id: int) -> dict[str, Any]:
+    """校验分类/标签 ID，禁止项与无合适匹配时均回落到「工具 / 工具」。"""
+    entry = validate_category_tag(second_category_id, tag_id)
+    if not is_forbidden_auto_tag(tag_id=int(entry["tagId"]), tag_name=str(entry["tag"])):
+        return entry
+    return get_default_tool_tag_entry()
+
 
 def format_category_tag_options(*, max_lines: int = 400) -> str:
     """供 LLM 选择的分类/标签列表（TSV）。"""
     lines = ["二级分类\tharmonyChildType\t标签\tkindMainTag"]
-    for item in CATEGORY_TAG_ENTRIES[:max_lines]:
+    for item in _iter_selectable_entries(max_lines=max_lines):
         lines.append(
             f"{item['category']}\t{item['secondCategoryId']}\t{item['tag']}\t{item['tagId']}"
         )
@@ -31,7 +81,7 @@ def format_category_tag_options_for_categories(category_ids: list[int]) -> str:
     """仅输出指定二级分类下的标签行，用于缩小 LLM 上下文。"""
     allow = {int(x) for x in category_ids}
     lines = ["二级分类\tharmonyChildType\t标签\tkindMainTag"]
-    for item in CATEGORY_TAG_ENTRIES:
+    for item in _iter_selectable_entries():
         if int(item["secondCategoryId"]) in allow:
             lines.append(
                 f"{item['category']}\t{item['secondCategoryId']}\t{item['tag']}\t{item['tagId']}"
@@ -40,7 +90,7 @@ def format_category_tag_options_for_categories(category_ids: list[int]) -> str:
 
 
 _CATEGORY_KEYWORDS: dict[int, tuple[str, ...]] = {
-    10000000: ("工具", "浏览器", "计算器", "备忘录", "手电筒", "Wi-Fi", "录音"),
+    10000000: ("工具", "计算器", "备忘录", "手电筒", "Wi-Fi", "录音"),
     10000001: ("办公", "笔记", "邮箱", "会议", "商务"),
     10000002: ("效率", "日程", "清单", "专注", "思维导图"),
     10000003: ("记账", "理财", "股票", "基金", "金融"),
@@ -69,10 +119,38 @@ _CATEGORY_KEYWORDS: dict[int, tuple[str, ...]] = {
 }
 
 
+from app.tools.harmony_webview_content import WEBVIEW_HTML_MARKER as _WEBVIEW_HTML_MARKER
+_SHELL_NOISE_RE = re.compile(
+    r"(?i)\b("
+    r"webview|webcomponent|webcomponents|rawfile|loadurl|javascriptproxy|"
+    r"arkweb|ohos\.web|browser|浏览器|web-view"
+    r")\b"
+)
+
+
+def prepare_tag_matching_text(text: str) -> str:
+    """WebView 工程优先依据 HTML 业务内容定类，并剥离壳层 WebView/浏览器 噪声。"""
+    raw = text or ""
+    if _WEBVIEW_HTML_MARKER in raw:
+        segment = raw.split(_WEBVIEW_HTML_MARKER, 1)[1]
+        segment = segment.split("\n\n===", 1)[0].strip()
+        app_name_line = next(
+            (line for line in raw.splitlines() if line.startswith("应用名称:")),
+            "",
+        )
+        blob = f"{app_name_line}\n{segment}" if app_name_line else segment
+    else:
+        blob = raw
+
+    blob = _SHELL_NOISE_RE.sub(" ", blob)
+    blob = re.sub(r"\s+", " ", blob).strip().lower()
+    return blob
+
+
 def resolve_best_category_tag(text: str) -> dict[str, Any]:
     """根据应用名/源码关键词直接选出分类+标签（无 LLM）。"""
-    blob = (text or "").lower()
-    categories = rank_categories_by_text(text)
+    blob = prepare_tag_matching_text(text)
+    categories = rank_categories_by_text(blob, prepared=True)
     best_entry: dict[str, Any] | None = None
     best_score = -1
 
@@ -80,9 +158,11 @@ def resolve_best_category_tag(text: str) -> dict[str, Any]:
         for item in CATEGORY_TAG_ENTRIES:
             if int(item["secondCategoryId"]) != category_id:
                 continue
+            if is_forbidden_auto_tag(tag_id=int(item["tagId"]), tag_name=str(item["tag"])):
+                continue
             tag = str(item["tag"])
             score = 0
-            if tag.lower() in blob:
+            if _tag_matches_blob(tag, blob):
                 score += 4
             for kw in _CATEGORY_KEYWORDS.get(category_id, ()):
                 kw_l = kw.lower()
@@ -92,18 +172,20 @@ def resolve_best_category_tag(text: str) -> dict[str, Any]:
                 best_score = score
                 best_entry = item
 
-    if best_entry is not None:
+    if best_entry is not None and best_score > 0:
         return best_entry
 
-    fallback = find_entry_by_tag_id(15000005)
-    if fallback is not None:
-        return fallback
-    return CATEGORY_TAG_ENTRIES[0]
+    return get_default_tool_tag_entry()
 
 
-def rank_categories_by_text(text: str, *, max_categories: int = 4) -> list[int]:
+def rank_categories_by_text(
+    text: str,
+    *,
+    max_categories: int = 4,
+    prepared: bool = False,
+) -> list[int]:
     """根据应用名/源码关键词为 LLM 预筛二级分类（默认工具类兜底）。"""
-    blob = (text or "").lower()
+    blob = text.lower() if prepared else prepare_tag_matching_text(text)
     scores: dict[int, int] = {}
     for category_id, keywords in _CATEGORY_KEYWORDS.items():
         score = sum(1 for kw in keywords if kw.lower() in blob)

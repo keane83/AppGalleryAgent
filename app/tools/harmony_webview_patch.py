@@ -139,7 +139,7 @@ def _patch_index_ets(source: Path) -> bool:
       if (script && script.length > 0) {
         setTimeout(() => {
           this.webController.runJavaScript(script);
-        }, 800);
+        }, 1200);
       }
     } catch (err) {
       console.error('harmony-auto screenshot script failed: ' + JSON.stringify(err));
