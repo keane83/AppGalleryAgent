@@ -21,6 +21,7 @@ from app.llm_factory import (
 )
 from app.logging_config import begin_request, finish_request, log_event
 from app.tool_progress import tool_progress_context
+from app.dsml_tools import recover_tool_calls_from_message, strip_dsml_markup
 from app.thinking import collect_agent_output, extract_message_parts
 from app.tools import TOOLS, safe_tool_log_content
 from app.tools.app_gallery_auth import (
@@ -75,6 +76,21 @@ FULL_FLOW_TOOL_SEQUENCE: tuple[str, ...] = (
     "update_app_gallery_build_update_app",
 )
 
+TOOL_STEP_LABELS: dict[str, str] = {
+    "create_app_gallery_app_id": "步骤 1",
+    "create_app_gallery_provision": "步骤 2",
+    "create_app_gallery_publish_app": "步骤 3",
+    "configure_harmony_app_signing": "步骤 4",
+    "replace_harmony_app_icon": "步骤 4b",
+    "capture_harmony_screenshots_and_app_icon": "步骤 5",
+    "update_app_gallery_app_file_info": "步骤 6",
+    "update_app_gallery_app_basic_info": "步骤 7",
+    "configure_app_gallery_privacy_agreement": "步骤 8",
+    "configure_app_gallery_age_rating": "步骤 9",
+    "update_app_gallery_build_update_app": "步骤 10",
+    "get_app_gallery_access_token": "辅助",
+}
+
 
 def _latest_user_message(raw_messages: list[dict[str, str]]) -> str:
     for item in reversed(raw_messages):
@@ -83,62 +99,139 @@ def _latest_user_message(raw_messages: list[dict[str, str]]) -> str:
     return ""
 
 
-def _infer_expected_tools(user_message: str) -> list[str]:
-    """从用户消息推断应调用的工具（单步任务）。"""
+def _tool_mentioned_in_message(user_message: str, tool_name: str) -> bool:
+    """判断用户消息是否提及某上架步骤工具。"""
     text = (user_message or "").strip()
     lower = text.lower()
-    expected: list[str] = []
-
-    def _add(name: str) -> None:
-        if name not in expected:
-            expected.append(name)
-
-    if any(
-        key in text
-        for key in (
-            "编译并上传",
-            "重新编译",
-            "编译上传",
-            "第10步",
-            "第 10 步",
-            "update_app_gallery_build_update_app",
-            "build_update_app",
+    if tool_name == "create_app_gallery_app_id":
+        return any(
+            key in lower
+            for key in (
+                "创建 appid",
+                "创建appid",
+                "创建 app id",
+                "app id",
+                "appid",
+                "第1步",
+                "第 1 步",
+                "create_app_gallery_app_id",
+            )
         )
-    ) or ("编译" in text and "上传" in text):
-        _add("update_app_gallery_build_update_app")
+    if tool_name == "create_app_gallery_provision":
+        return any(
+            key in lower
+            for key in (
+                "申请 profile",
+                "申请profile",
+                "生成profile",
+                "生成 profile",
+                "下载 profile",
+                "下载profile",
+                "profile",
+                "第2步",
+                "第 2 步",
+                "create_app_gallery_provision",
+            )
+        )
+    if tool_name == "create_app_gallery_publish_app":
+        return any(
+            key in text
+            for key in (
+                "新建发布",
+                "创建发布",
+                "发布应用",
+                "控制台发布",
+                "第3步",
+                "第 3 步",
+                "create_app_gallery_publish",
+            )
+        )
+    if tool_name == "configure_harmony_app_signing":
+        return any(
+            key in text
+            for key in ("配置签名", "第4步", "第 4 步", "configure_harmony")
+        )
+    if tool_name == "replace_harmony_app_icon":
+        if _extract_icon_path(text):
+            return True
+        return any(key in lower for key in ("换icon", "换 icon", "replace_harmony_app_icon")) and any(
+            ext in lower for ext in (".png", ".jpg", ".jpeg", ".webp")
+        )
+    if tool_name == "capture_harmony_screenshots_and_app_icon":
+        return any(key in text for key in ("截图", "第5步", "第 5 步", "capture_harmony"))
+    if tool_name == "update_app_gallery_app_file_info":
+        return any(key in text for key in ("上传图标", "上传截图", "第6步", "第 6 步", "app_file_info"))
+    if tool_name == "update_app_gallery_app_basic_info":
+        return any(key in text for key in ("更新基本信息", "应用介绍", "第7步", "第 7 步", "app_basic_info"))
+    if tool_name == "configure_app_gallery_privacy_agreement":
+        return any(
+            key in text
+            for key in ("隐私协议", "隐私政策", "第8步", "第 8 步", "configure_app_gallery_privacy")
+        )
+    if tool_name == "configure_app_gallery_age_rating":
+        return any(
+            key in text
+            for key in ("年龄分级", "内容分级", "第9步", "第 9 步", "configure_app_gallery_age")
+        )
+    if tool_name == "update_app_gallery_build_update_app":
+        return any(
+            key in text
+            for key in (
+                "编译并上传",
+                "重新编译",
+                "编译上传",
+                "第10步",
+                "第 10 步",
+                "update_app_gallery_build_update_app",
+                "build_update_app",
+            )
+        ) or ("编译" in text and "上传" in text)
+    return False
 
-    if any(key in text for key in ("更新基本信息", "应用介绍", "第7步", "app_basic_info")):
-        _add("update_app_gallery_app_basic_info")
-    if any(
-        key in text
-        for key in ("隐私协议", "隐私政策", "第8步", "第 8 步", "configure_app_gallery_privacy")
-    ):
-        _add("configure_app_gallery_privacy_agreement")
-    if any(
-        key in text
-        for key in ("年龄分级", "内容分级", "第9步", "第 9 步", "configure_app_gallery_age")
-    ):
-        _add("configure_app_gallery_age_rating")
-    if any(key in text for key in ("上传图标", "上传截图", "第6步", "app_file_info")):
-        _add("update_app_gallery_app_file_info")
-    if any(key in text for key in ("新建发布", "第3步", "create_app_gallery_publish")):
-        _add("create_app_gallery_publish_app")
-    if any(key in text for key in ("申请 profile", "申请Profile", "第2步", "create_app_gallery_provision")):
-        _add("create_app_gallery_provision")
-    if any(key in lower for key in ("创建 appid", "创建appid", "app id", "第1步", "create_app_gallery_app_id")):
-        _add("create_app_gallery_app_id")
-    if any(key in text for key in ("截图", "第5步", "capture_harmony")):
-        _add("capture_harmony_screenshots_and_app_icon")
-    if any(key in text for key in ("配置签名", "第4步", "configure_harmony")):
-        _add("configure_harmony_app_signing")
-    if _extract_icon_path(text):
-        _add("replace_harmony_app_icon")
-    elif any(key in lower for key in ("换icon", "换 icon", "replace_harmony_app_icon", "应用图标")):
-        if any(ext in lower for ext in (".png", ".jpg", ".jpeg", ".webp")):
-            _add("replace_harmony_app_icon")
-    if any(key in text for key in ("完整上架", "全流程", "一键上架", "从头到尾", "按推荐顺序")):
-        return []  # 全流程由逐步清单驱动，不在此强制单工具
-    return expected
+
+def _infer_chain_tools(user_message: str) -> list[str]:
+    """按推荐顺序推断用户消息中涉及的多个步骤（不含全流程关键字）。"""
+    if _is_full_flow_request(user_message):
+        return []
+    chain: list[str] = []
+    for tool_name in FULL_FLOW_TOOL_SEQUENCE:
+        if _tool_mentioned_in_message(user_message, tool_name):
+            chain.append(tool_name)
+    if _tool_mentioned_in_message(user_message, "replace_harmony_app_icon"):
+        if "replace_harmony_app_icon" not in chain:
+            insert_at = 0
+            if "configure_harmony_app_signing" in chain:
+                insert_at = chain.index("configure_harmony_app_signing") + 1
+            chain.insert(insert_at, "replace_harmony_app_icon")
+    return chain
+
+
+def _active_tool_sequence(user_message: str) -> list[str]:
+    """当前请求应遵循的工具顺序（全流程或多步链）。"""
+    if _is_full_flow_request(user_message):
+        return _full_flow_sequence(user_message)
+    chain = _infer_chain_tools(user_message)
+    if len(chain) > 1:
+        return chain
+    return []
+
+
+def _next_sequence_tool(tools_executed: set[str], sequence: list[str]) -> str | None:
+    for name in sequence:
+        if name not in tools_executed:
+            return name
+    return None
+
+
+def _infer_expected_tools(user_message: str) -> list[str]:
+    """从用户消息推断应调用的工具。"""
+    sequence = _active_tool_sequence(user_message)
+    if sequence:
+        return sequence
+    chain = _infer_chain_tools(user_message)
+    if len(chain) == 1:
+        return chain
+    return []
 
 
 def _looks_like_fake_tool_result(content: str) -> bool:
@@ -181,11 +274,12 @@ def _should_force_tool_retry(
     return True, missing
 
 
-def _tool_retry_message(missing_tools: list[str]) -> str:
-    tool_list = "、".join(missing_tools)
+def _tool_retry_message(missing_tools: list[str], *, next_tool: str | None = None) -> str:
+    target = next_tool or (missing_tools[0] if missing_tools else "")
     return (
-        f"【系统】你刚才没有通过 tool_calls 调用工具。"
-        f"用户要求真执行，请立即调用：{tool_list}。"
+        f"【系统】你刚才没有通过 API tool_calls 调用工具。"
+        f"禁止在正文输出 DSML/XML 等伪工具调用标记。"
+        f"请立即只调用下一个工具：{target}。"
         f"禁止编造 objectId、packageId、编译产物或「已完成」类结论；"
         f"必须等 ToolMessage 返回后再总结。"
     )
@@ -342,16 +436,17 @@ def _round_wants_tool_calls(
         if _is_system_hint_message(content):
             if "禁止调用任何其他工具" in content:
                 return False
-            if content.startswith("【系统-全流程】"):
+            if content.startswith(("【系统-全流程】", "【系统-多步任务】")):
                 return True
             return False
         return True
     if isinstance(last, ToolMessage):
+        sequence = _active_tool_sequence(user_message)
+        if sequence:
+            return _next_sequence_tool(tools_executed, sequence) is not None
         if _is_single_step_request(user_message):
             expected = _infer_expected_tools(user_message)
             return any(name not in tools_executed for name in expected)
-        if _is_full_flow_request(user_message):
-            return _next_full_flow_tool(tools_executed, user_message) is not None
         return False
     return True
 
@@ -377,26 +472,35 @@ def _post_tool_system_hint(
     tools_executed: set[str],
 ) -> str | None:
     """工具执行后注入系统提示，约束下一步行为。"""
+    sequence = _active_tool_sequence(user_message)
+    if sequence:
+        next_tool = _next_sequence_tool(tools_executed, sequence)
+        if next_tool:
+            args_hint = _full_flow_tool_args_hint(next_tool, user_message)
+            extra = ""
+            if next_tool == "replace_harmony_app_icon":
+                extra = "必须在 capture_harmony_screenshots_and_app_icon 之前执行。"
+            label = "【系统-全流程】" if _is_full_flow_request(user_message) else "【系统-多步任务】"
+            full_flow_extra = (
+                "不得跳过中间步骤；第8步 privacy 与第9步 age_rating 不可省略。"
+                if _is_full_flow_request(user_message)
+                else "按用户要求的顺序逐步执行，不要跳步。"
+            )
+            return (
+                f"{label}上一步工具已返回。请立即通过 API tool_calls 调用：{next_tool}{args_hint}。"
+                f"禁止在正文写 DSML/XML 伪工具调用。{extra}{full_flow_extra}"
+                "其余参数从 ToolMessage 与历史消息提取。"
+            )
+        return (
+            "【系统】用户要求的步骤已全部完成。"
+            "请根据各步 ToolMessage 做结构化总结，禁止调用任何其他工具。"
+        )
     if _is_single_step_request(user_message):
         expected = _infer_expected_tools(user_message)
         if expected and all(name in tools_executed for name in expected):
             return (
                 "【系统】用户仅要求完成指定单步，该步已完成。"
                 "请根据 ToolMessage 做结构化总结，禁止调用任何其他工具。"
-            )
-        return None
-    if _is_full_flow_request(user_message):
-        next_tool = _next_full_flow_tool(tools_executed, user_message)
-        if next_tool:
-            args_hint = _full_flow_tool_args_hint(next_tool, user_message)
-            extra = ""
-            if next_tool == "replace_harmony_app_icon":
-                extra = "必须在 capture_harmony_screenshots_and_app_icon 之前执行。"
-            return (
-                f"【系统-全流程】上一步工具已返回。请立即调用：{next_tool}{args_hint}。"
-                f"{extra}"
-                "不得跳过中间步骤；第8步 privacy 与第9步 age_rating 不可省略。"
-                "其余参数从 ToolMessage 与历史消息提取。"
             )
     return None
 
@@ -409,16 +513,45 @@ def _build_agent_llm(*, wants_tool_calls: bool) -> BaseChatModel:
 
 
 def _format_tool_call_plan(tool_calls: list[dict[str, Any]]) -> str:
-    lines = ["已决定调用以下工具："]
+    lines = ["【即将执行工具】"]
     for call in tool_calls:
         name = str(call.get("name") or "")
+        step = TOOL_STEP_LABELS.get(name, "")
+        step_prefix = f"{step} · " if step else ""
         args = call.get("args") or {}
         try:
             args_text = json.dumps(args, ensure_ascii=False, indent=2)
         except TypeError:
             args_text = str(args)
-        lines.append(f"• {name}\n  参数：{args_text}")
+        lines.append(f"• {step_prefix}{name}\n  参数：{args_text}")
     return "\n".join(lines) + "\n"
+
+
+def _recover_message_tool_calls(message: AIMessage) -> AIMessage:
+    """若模型把工具调用写进 DSML 正文，解析为真实 tool_calls。"""
+    if message.tool_calls:
+        return message
+    thinking, content = extract_message_parts(message)
+    blob = "\n".join(part for part in (thinking, content) if part)
+    _, tool_calls = recover_tool_calls_from_message(blob)
+    if not tool_calls:
+        return message
+    return AIMessage(
+        content=strip_dsml_markup(content),
+        tool_calls=tool_calls,
+        additional_kwargs=dict(message.additional_kwargs),
+    )
+
+
+def _format_tool_result_thinking(tool_name: str, tool_result: Any) -> str:
+    """工具完成后写入思考区，便于用户跟踪全流程。"""
+    step = TOOL_STEP_LABELS.get(tool_name, "")
+    step_prefix = f"{step} " if step else ""
+    snippet = safe_tool_log_content(tool_name, tool_result)
+    text = str(snippet).strip()
+    if len(text) > 1600:
+        text = text[:1600] + "\n…（结果已截断）"
+    return f"\n【{step_prefix}{tool_name} 已完成】\n{text}\n"
 
 
 def _message_summary(message: BaseMessage) -> str:
@@ -533,7 +666,7 @@ def _call_model(state: AgentState, config) -> dict[str, list[BaseMessage]]:
     response: AIMessage | None = None
 
     for attempt in range(1, 4):
-        response = llm.invoke(working_messages)
+        response = _recover_message_tool_calls(llm.invoke(working_messages))
         if response.tool_calls:
             for tool_call in response.tool_calls:
                 log_event(
@@ -563,7 +696,12 @@ def _call_model(state: AgentState, config) -> dict[str, list[BaseMessage]]:
             thinking_len=len(thinking),
             content=content,
         )
-        working_messages = working_messages + [response, HumanMessage(content=_tool_retry_message(missing))]
+        sequence = _active_tool_sequence(user_message)
+        next_tool = _next_sequence_tool(tools_executed, sequence) if sequence else None
+        working_messages = working_messages + [
+            response,
+            HumanMessage(content=_tool_retry_message(missing, next_tool=next_tool)),
+        ]
 
     assert response is not None
     thinking, content = extract_message_parts(response)
@@ -724,10 +862,9 @@ def stream_agent(raw_messages: list[dict[str, str]]):
                 user_message,
                 tools_executed=tools_executed,
             )
-            buffer_output = wants_tool_calls
+            buffer_content = wants_tool_calls
             llm = _build_agent_llm(wants_tool_calls=wants_tool_calls)
             accumulated: AIMessage | None = None
-            thinking_buffer: list[str] = []
             content_buffer: list[str] = []
 
             for chunk in llm.stream(messages):
@@ -735,13 +872,10 @@ def stream_agent(raw_messages: list[dict[str, str]]):
 
                 thinking_token = chunk.additional_kwargs.get("reasoning_content")
                 if thinking_token:
-                    if buffer_output:
-                        thinking_buffer.append(thinking_token)
-                    else:
-                        yield {"type": "thinking", "token": thinking_token}
+                    yield {"type": "thinking", "token": thinking_token}
 
                 if chunk.content:
-                    if buffer_output:
+                    if buffer_content:
                         content_buffer.append(chunk.content)
                     else:
                         yield {"type": "content", "token": chunk.content}
@@ -749,14 +883,16 @@ def stream_agent(raw_messages: list[dict[str, str]]):
             if accumulated is None:
                 raise RuntimeError("LLM 未返回任何内容")
 
+            accumulated = _recover_message_tool_calls(accumulated)
+
             if accumulated.tool_calls:
                 tool_names = ", ".join(call["name"] for call in accumulated.tool_calls)
                 yield {"type": "status", "text": f"正在调用工具：{tool_names}"}
 
                 pre_tool_thinking, pre_tool_content = extract_message_parts(accumulated)
                 plan_blob = pre_tool_thinking + pre_tool_content
-                if pre_tool_thinking and not _looks_like_premature_completion(plan_blob):
-                    yield {"type": "thinking", "token": pre_tool_thinking + "\n\n"}
+                if pre_tool_content and not _looks_like_premature_completion(plan_blob):
+                    yield {"type": "thinking", "token": "\n" + pre_tool_content.strip() + "\n\n"}
                 yield {
                     "type": "thinking",
                     "token": _format_tool_call_plan(accumulated.tool_calls),
@@ -823,6 +959,10 @@ def stream_agent(raw_messages: list[dict[str, str]]):
                         )
                     )
                     tools_executed.add(tool_name)
+                    yield {
+                        "type": "thinking",
+                        "token": _format_tool_result_thinking(tool_name, tool_result),
+                    }
                 hint = _post_tool_system_hint(user_message, tools_executed=tools_executed)
                 if hint:
                     messages.append(HumanMessage(content=hint))
@@ -845,15 +985,23 @@ def stream_agent(raw_messages: list[dict[str, str]]):
                     content=content,
                 )
                 messages.append(accumulated)
-                messages.append(HumanMessage(content=_tool_retry_message(missing)))
-                for thinking_token in thinking_buffer:
-                    yield {"type": "thinking", "token": thinking_token}
+                sequence = _active_tool_sequence(user_message)
+                next_tool = _next_sequence_tool(tools_executed, sequence) if sequence else None
+                messages.append(
+                    HumanMessage(content=_tool_retry_message(missing, next_tool=next_tool))
+                )
                 yield {"type": "status", "text": "模型未实际调用工具，正在重试…"}
                 continue
 
-            if buffer_output:
-                for thinking_token in thinking_buffer:
-                    yield {"type": "thinking", "token": thinking_token}
+            if buffer_content:
+                thinking, content = extract_message_parts(accumulated)
+                content = strip_dsml_markup(content)
+                plan_blob = thinking + content
+                if content and not _looks_like_premature_completion(plan_blob):
+                    yield {"type": "thinking", "token": "\n" + content.strip() + "\n\n"}
+                elif content:
+                    yield {"type": "content", "token": content}
+            else:
                 for content_token in content_buffer:
                     yield {"type": "content", "token": content_token}
 
