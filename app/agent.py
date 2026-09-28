@@ -242,10 +242,21 @@ def _should_force_tool_retry(
     message: AIMessage,
     *,
     tools_executed: set[str],
+    messages: list[BaseMessage] | None = None,
 ) -> tuple[bool, list[str]]:
     """模型未发起 tool_calls 但用户明确要执行工具时，应重试。"""
     if message.tool_calls:
         return False, []
+
+    # 上一步工具已失败：不要强推后续步骤
+    if messages:
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage) and "禁止调用任何其他工具" in str(msg.content or ""):
+                return False, []
+            if isinstance(msg, ToolMessage):
+                if _tool_result_failed(msg.content):
+                    return False, []
+                break
 
     expected = _infer_expected_tools(user_message)
     if not expected:
@@ -254,6 +265,14 @@ def _should_force_tool_retry(
     missing = [name for name in expected if name not in tools_executed]
     if not missing:
         return False, []
+
+    # 链式/全流程：只强制「下一个」缺失工具，且要求前序都已成功执行过
+    sequence = _active_tool_sequence(user_message)
+    if sequence:
+        next_tool = _next_sequence_tool(tools_executed, sequence)
+        if not next_tool:
+            return False, []
+        missing = [next_tool]
 
     _, content = extract_message_parts(message)
     wants_real_tool = any(
@@ -457,12 +476,45 @@ def _full_flow_tool_args_hint(tool_name: str, user_message: str) -> str:
     return ""
 
 
+def _tool_result_failed(tool_result: Any) -> bool:
+    """工具返回是否表示失败（ok=false 或明显 error）。"""
+    if tool_result is None:
+        return True
+    if isinstance(tool_result, dict):
+        if tool_result.get("ok") is False:
+            return True
+        if tool_result.get("error") and not tool_result.get("ok"):
+            return True
+        return False
+    text = str(tool_result).strip()
+    if not text:
+        return True
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    if isinstance(data, dict):
+        if data.get("ok") is False:
+            return True
+        if data.get("error") and not data.get("ok"):
+            return True
+    return False
+
+
 def _post_tool_system_hint(
     user_message: str,
     *,
     tools_executed: set[str],
+    last_tool_name: str | None = None,
+    last_tool_result: Any = None,
 ) -> str | None:
     """工具执行后注入系统提示，约束下一步行为。"""
+    if last_tool_name and _tool_result_failed(last_tool_result):
+        return (
+            f"【系统】上一步「{user_tool_label(last_tool_name)}」失败，请根据 ToolMessage 说明原因与修复建议，"
+            "禁止调用任何其他工具，等待用户处理后再继续。"
+        )
+
     sequence = _active_tool_sequence(user_message)
     if sequence:
         next_tool = _next_sequence_tool(tools_executed, sequence)
@@ -647,6 +699,7 @@ def _call_model(state: AgentState, config) -> dict[str, list[BaseMessage]]:
             user_message,
             response,
             tools_executed=tools_executed,
+            messages=working_messages,
         )
         if not should_retry or attempt >= 3:
             break
@@ -926,15 +979,24 @@ def stream_agent(raw_messages: list[dict[str, str]]):
                         )
                     )
                     tools_executed.add(tool_name)
-                hint = _post_tool_system_hint(user_message, tools_executed=tools_executed)
-                if hint:
-                    messages.append(HumanMessage(content=hint))
+                    hint = _post_tool_system_hint(
+                        user_message,
+                        tools_executed=tools_executed,
+                        last_tool_name=tool_name,
+                        last_tool_result=tool_result,
+                    )
+                    if hint:
+                        messages.append(HumanMessage(content=hint))
+                    if _tool_result_failed(tool_result):
+                        # 失败则停止本轮后续工具与全流程推进
+                        break
                 continue
 
             should_retry, missing = _should_force_tool_retry(
                 user_message,
                 accumulated,
                 tools_executed=tools_executed,
+                messages=messages,
             )
             if should_retry and round_no < max_rounds:
                 thinking, content = extract_message_parts(accumulated)

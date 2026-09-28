@@ -166,6 +166,44 @@ def request_ollama_json(
     )
 
 
+def _normalize_api_base_url(base_url: str) -> str:
+    """DeepSeek 等兼容接口需要 …/v1/chat/completions。"""
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return "https://api.deepseek.com/v1"
+    if base.endswith("/v1"):
+        return base
+    if "deepseek.com" in base and "/v1" not in base:
+        return f"{base}/v1"
+    return base
+
+
+def _parse_json_object(content: str, *, source: str) -> dict[str, Any]:
+    text = (content or "").strip()
+    if not text:
+        raise ValueError(f"{source} 返回空 content")
+
+    # 允许偶发 markdown 包裹
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.I)
+    if fence:
+        text = fence.group(1).strip()
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", text)
+        if not match:
+            raise ValueError(f"{source} 返回非 JSON 内容：{text[:240]}") from None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{source} 返回非 JSON 内容：{text[:240]}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{source} JSON 根节点必须是 object：{type(parsed).__name__}")
+    return parsed
+
+
 def _openai_compatible_json(
     system: str,
     user: str,
@@ -179,48 +217,88 @@ def _openai_compatible_json(
         raise ValueError(config_error)
 
     model_name = model or get_active_model_name(for_tool=True)
-    payload: dict[str, Any] = {
-        "model": model_name,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "response_format": {"type": "json_object"},
-        "temperature": min(OLLAMA_TEMPERATURE, 0.3),
-        "stream": False,
-    }
-    if num_predict is not None:
-        payload["max_tokens"] = num_predict
-
+    # deepseek-flash 等可能把大量 token 用在 reasoning，content 易被 length 截断
+    token_budget = max(int(num_predict or 1600), 1600)
     headers = {
         "Authorization": f"Bearer {LLM_API_KEY}",
         "Content-Type": "application/json",
     }
-    url = f"{LLM_API_BASE_URL.rstrip('/')}/chat/completions"
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+    url = f"{_normalize_api_base_url(LLM_API_BASE_URL)}/chat/completions"
+    last_error: Exception | None = None
 
-    choices = data.get("choices") or []
-    if not choices:
-        raise ValueError(f"API 返回空 choices：{json.dumps(data, ensure_ascii=False)[:240]}")
-    message = choices[0].get("message") or {}
-    content = str(message.get("content") or "").strip()
-    if not content:
-        raise ValueError(
-            "API 返回空 content"
-            f"（finish_reason={choices[0].get('finish_reason')}）"
+    for attempt, budget in enumerate((token_budget, token_budget * 2, max(token_budget * 3, 4096)), start=1):
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": min(OLLAMA_TEMPERATURE, 0.3),
+            "stream": False,
+            "max_tokens": budget,
+            # deepseek-flash/pro 默认 thinking=on，推理 token 会计入 max_tokens，
+            # 易出现 finish_reason=length 且 content 为空。规划 JSON 必须关闭。
+            "thinking": {"type": "disabled"},
+        }
+        logger.info(
+            "工具内 LLM JSON 调用：provider=api model=%s max_tokens=%s attempt=%s",
+            model_name,
+            budget,
+            attempt,
         )
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
 
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"API 返回非 JSON 内容：{content[:240]}") from exc
+        choices = data.get("choices") or []
+        if not choices:
+            raise ValueError(f"API 返回空 choices：{json.dumps(data, ensure_ascii=False)[:240]}")
 
-    if not isinstance(parsed, dict):
-        raise ValueError(f"API JSON 根节点必须是 object：{type(parsed).__name__}")
-    return parsed
+        choice = choices[0]
+        finish_reason = str(choice.get("finish_reason") or "")
+        message = choice.get("message") or {}
+        content = str(message.get("content") or "").strip()
+        reasoning = str(
+            message.get("reasoning_content")
+            or message.get("reasoning")
+            or ""
+        ).strip()
+        usage = data.get("usage") or {}
+
+        if content:
+            try:
+                return _parse_json_object(content, source="API")
+            except ValueError as exc:
+                last_error = exc
+                # 截断导致 JSON 不完整时加大预算重试
+                if finish_reason == "length" and attempt < 3:
+                    logger.warning(
+                        "API JSON 不完整（finish_reason=length），加大 max_tokens 重试；usage=%s",
+                        usage,
+                    )
+                    continue
+                raise
+
+        # content 空：尝试从 reasoning 抠 JSON
+        if reasoning:
+            try:
+                return _parse_json_object(reasoning, source="API(reasoning)")
+            except ValueError:
+                pass
+
+        last_error = ValueError(
+            "API 返回空 content"
+            f"（finish_reason={finish_reason}, reasoning_chars={len(reasoning)}, usage={usage}）"
+        )
+        if finish_reason == "length" and attempt < 3:
+            logger.warning("%s；加大 max_tokens 重试", last_error)
+            continue
+        raise last_error
+
+    assert last_error is not None
+    raise last_error
 
 
 def _ollama_json(
@@ -236,18 +314,21 @@ def _ollama_json(
     if num_predict is not None:
         options["num_predict"] = num_predict
 
+    model_name = model or OLLAMA_TOOL_MODEL or OLLAMA_MODEL
     payload: dict[str, Any] = {
-        "model": model or OLLAMA_TOOL_MODEL or OLLAMA_MODEL,
+        "model": model_name,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         "stream": False,
         "format": "json",
+        # 规划必须拿 content JSON；thinking 开启时部分模型会把结果塞进 thinking、content 为空
         "think": think,
         "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": options,
     }
+    logger.info("工具内 LLM JSON 调用：provider=ollama model=%s think=%s", model_name, think)
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
         resp.raise_for_status()
@@ -255,22 +336,21 @@ def _ollama_json(
 
     message = data.get("message") or {}
     content = str(message.get("content") or "").strip()
+    thinking = str(message.get("thinking") or "").strip()
+    if not content and thinking:
+        # 兜底：少数 reasoning 模型仍把 JSON 写进 thinking
+        try:
+            return _parse_json_object(thinking, source="Ollama(thinking)")
+        except ValueError:
+            pass
     if not content:
         done_reason = data.get("done_reason")
-        thinking_len = len(str(message.get("thinking") or ""))
         raise ValueError(
             "Ollama 返回空 content"
-            f"（done_reason={done_reason}, thinking_chars={thinking_len}）"
+            f"（done_reason={done_reason}, thinking_chars={len(thinking)}）。"
+            "截图规划请关闭 OLLAMA_REASONING，或改用 LLM_PROVIDER=deepseek。"
         )
-
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Ollama 返回非 JSON 内容：{content[:240]}") from exc
-
-    if not isinstance(parsed, dict):
-        raise ValueError(f"Ollama JSON 根节点必须是 object：{type(parsed).__name__}")
-    return parsed
+    return _parse_json_object(content, source="Ollama")
 
 
 def _slugify(label: str, fallback: str) -> str:
@@ -301,7 +381,7 @@ def plan_flutter_with_llm(flutter_root: Path, *, count: int = 3) -> dict[str, An
         '"screenshots":[{"tabIndex":0,"slug":"home","label":"首页","reason":"..."}]}'
     )
     try:
-        raw = _ollama_json(system, user)
+        raw = request_llm_json(system, user, num_predict=2048, timeout=120.0)
     except Exception as exc:
         logger.warning("Flutter LLM 规划失败: %s", exc)
         return None
@@ -363,27 +443,28 @@ def plan_webview_with_llm(
     context = collect_webview_context(ohos_root, html_path, index_ets)
     system = (
         "你是 HarmonyOS WebView 本地 HTML 应用商店截图规划器。"
-        "根据 HTML/JS 分析应用的主要界面，规划应用商店介绍截图。"
-        "WebView 通过 runJavaScript 执行 script 切页后截图。输出严格 JSON，不要 markdown。"
+        "根据 HTML/JS 规划商店介绍截图。只输出紧凑 JSON，不要 markdown，不要解释。"
         "script 必须是可在 WebView 内直接执行的 JS：优先 querySelector + click()；"
-        "支持 data-tab 导航，例如 document.querySelector('.nav-item[data-tab=\"shops\"]')?.click()；"
-        "避免调用 HTML 内闭包函数（如 switchTab），除非能从 DOM 直接触发。"
-        "第一个截图若已是默认页，script 可为空字符串，waitSec 建议 9。"
-        "选择差异明显、能展示核心功能的 3 个主界面，不要选空白/登录/弹窗。"
-        f"screenshots 数组长度应为 {count}。"
+        "支持 data-tab 导航；避免调用 HTML 内闭包函数。"
+        "第一个截图若已是默认页，script 可为空字符串。"
+        f"screenshots 恰好 {count} 项；每项字段仅 slug/label/script/reason/waitSec。"
     )
     user = (
-        f"OHOS 根目录: {ohos_root}\nHTML: {html_path.name}\n需要 {count} 张不同截图。\n\n"
+        f"OHOS: {ohos_root}\nHTML: {html_path.name}\n需要 {count} 张不同截图。\n\n"
         f"{context}\n\n"
-        "输出 JSON 示例:\n"
-        '{"screenshots":[{"slug":"home","label":"首页","script":"",'
+        '输出示例:{"screenshots":[{"slug":"home","label":"首页","script":"",'
         '"reason":"默认首页","waitSec":9},'
         '{"slug":"shops","label":"店铺","script":"document.querySelector(\'.nav-item[data-tab=\\"shops\\"]\')?.click();",'
-        '"reason":"底部导航切到店铺","waitSec":5.5}]}'
+        '"reason":"底部导航","waitSec":5.5}]}'
     )
     try:
-        logger.info("WebView 截图规划：调用 LLM 分析 HTML（auto_fallback=%s）", auto_fallback)
-        raw = _ollama_json(system, user, num_predict=800, timeout=90.0)
+        provider = "api" if is_api_provider() else "ollama"
+        logger.info(
+            "WebView 截图规划：调用 LLM 分析 HTML（provider=%s auto_fallback=%s）",
+            provider,
+            auto_fallback,
+        )
+        raw = request_llm_json(system, user, num_predict=2048, timeout=120.0)
     except Exception as exc:
         logger.warning("WebView LLM 规划失败: %s", exc)
         return None

@@ -268,7 +268,8 @@ def plan_webview_screenshots(ohos_root: Path, *, count: int = 3) -> dict[str, ob
     if not shots:
         raise ValueError(
             "未能规划 WebView 截图页面：启发式规则未识别 HTML 导航，且 LLM 规划未返回有效结果。"
-            "请确认 Ollama 已运行；或设置 HARMONY_WEBVIEW_LLM_AUTO=true（默认已开）。"
+            "当前 LLM_PROVIDER=deepseek 时会走 DeepSeek API；若用 ollama，请确认服务已运行且模型可用。"
+            "也可设置 HARMONY_WEBVIEW_LLM_AUTO=true（默认已开）。"
         )
 
     return heuristic

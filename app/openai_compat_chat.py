@@ -117,19 +117,31 @@ class OpenAICompatChat(BaseChatModel):
         return self.model_copy(update={"bound_tools": list(tools)})
 
     def _build_payload(self, messages: list[BaseMessage], *, stream: bool) -> dict[str, Any]:
+        base = self.base_url.rstrip("/")
+        if "deepseek.com" in base and not base.endswith("/v1"):
+            base = f"{base}/v1"
+        # 供 _post_chat / _stream 使用
+        self._resolved_base_url = base
+
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": _to_api_messages(messages),
             "temperature": self.temperature,
             "stream": stream,
+            # flash/pro 默认 thinking=on；工具调用轮次关闭，避免 token 被推理占满
+            "thinking": {"type": "disabled" if self.bound_tools else "enabled"},
         }
         if self.bound_tools:
             payload["tools"] = _tool_specs(self.bound_tools)
             payload["tool_choice"] = "auto"
+            payload["thinking"] = {"type": "disabled"}
         return payload
 
     def _post_chat(self, payload: dict[str, Any], *, timeout: float = 180.0) -> dict[str, Any]:
-        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        base = getattr(self, "_resolved_base_url", None) or self.base_url.rstrip("/")
+        if "deepseek.com" in base and not base.endswith("/v1"):
+            base = f"{base}/v1"
+        url = f"{base}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -166,12 +178,15 @@ class OpenAICompatChat(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
-        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        payload = self._build_payload(messages, stream=True)
+        base = getattr(self, "_resolved_base_url", None) or self.base_url.rstrip("/")
+        if "deepseek.com" in base and not base.endswith("/v1"):
+            base = f"{base}/v1"
+        url = f"{base}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        payload = self._build_payload(messages, stream=True)
 
         tool_calls_acc: dict[int, dict[str, Any]] = {}
         content_parts: list[str] = []
