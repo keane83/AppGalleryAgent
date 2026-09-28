@@ -27,9 +27,12 @@ DEVICE_BOOT_TIMEOUT_SEC = 180
 APP_FOREGROUND_TIMEOUT_SEC = 60
 APP_FOREGROUND_POLL_SEC = 0.35
 PAGE_RENDER_SETTLE_SEC = float(os.getenv("HARMONY_PAGE_RENDER_WAIT_SEC", "2.5"))
-FLUTTER_RENDER_SETTLE_SEC = float(os.getenv("HARMONY_FLUTTER_RENDER_WAIT_SEC", "3.5"))
-FIRST_SHOT_EXTRA_SETTLE_SEC = float(os.getenv("HARMONY_FIRST_SHOT_EXTRA_WAIT_SEC", "2.0"))
+FLUTTER_RENDER_SETTLE_SEC = float(os.getenv("HARMONY_FLUTTER_RENDER_WAIT_SEC", "6.0"))
+FIRST_SHOT_EXTRA_SETTLE_SEC = float(os.getenv("HARMONY_FIRST_SHOT_EXTRA_WAIT_SEC", "3.0"))
 FLUTTER_FIRST_EXTRA_SETTLE_SEC = FIRST_SHOT_EXTRA_SETTLE_SEC
+FLUTTER_SPLASH_RETRY_MAX = int(os.getenv("HARMONY_FLUTTER_SPLASH_RETRY_MAX", "8"))
+FLUTTER_SPLASH_RETRY_DELAY_SEC = float(os.getenv("HARMONY_FLUTTER_SPLASH_RETRY_DELAY_SEC", "1.2"))
+FLUTTER_SPLASH_SIMILARITY = float(os.getenv("HARMONY_FLUTTER_SPLASH_SIMILARITY", "0.93"))
 WEBVIEW_RENDER_SETTLE_SEC = float(os.getenv("HARMONY_WEBVIEW_RENDER_WAIT_SEC", "3.0"))
 WEBVIEW_FIRST_EXTRA_SETTLE_SEC = float(os.getenv("HARMONY_WEBVIEW_FIRST_EXTRA_WAIT_SEC", "4.0"))
 WEBVIEW_ACTION_EXTRA_WAIT_SEC = float(os.getenv("HARMONY_WEBVIEW_ACTION_EXTRA_WAIT_SEC", "1.5"))
@@ -407,6 +410,98 @@ def flutter_tab_click(
     return x, y
 
 
+def _flutter_bin() -> str:
+    load_dotenv(_PROJECT_ROOT / ".env", override=True)
+    return os.getenv("FLUTTER_BIN", shutil.which("flutter") or "flutter")
+
+
+def _flutter_should_skip_pub(flutter_root: Path) -> bool:
+    """依赖已解析时跳过 pub get，避免每次 build 多等数十秒。
+
+    FLUTTER_BUILD_SKIP_PUB=0 强制每次跑 pub；未设置时若已有 package_config 则跳过。
+    """
+    load_dotenv(_PROJECT_ROOT / ".env", override=True)
+    raw = (os.getenv("FLUTTER_BUILD_SKIP_PUB") or "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return (flutter_root / ".dart_tool/package_config.json").is_file()
+
+
+def _run_flutter_build(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    label: str,
+    timeout: int = 900,
+    progress_interval_sec: float = 15.0,
+) -> subprocess.CompletedProcess[str]:
+    """跑 Flutter 编译，并周期性上报进度（避免 UI 长时间停在同一状态）。"""
+    from app.tool_progress import report_tool_progress
+
+    mode = "release" if "--release" in cmd else ("debug" if "--debug" in cmd else "default")
+    logger.info("开始编译 Flutter %s（mode=%s）…", label, mode)
+    report_tool_progress(
+        f"编译 Flutter {label}",
+        step=f"编译 Flutter {label}",
+        detail=f"mode={mode}，首次/冷启动可能较久…",
+        status="running",
+    )
+    started = time.time()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    chunks: list[str] = []
+    assert proc.stdout is not None
+    last_report = started
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line and proc.poll() is not None:
+                break
+            if line:
+                chunks.append(line)
+                stripped = line.strip()
+                if stripped and (
+                    "error" in stripped.lower()
+                    or stripped.startswith(">")
+                    or "Building" in stripped
+                    or "Running" in stripped
+                    or "✓" in stripped
+                    or "√" in stripped
+                ):
+                    logger.info("[flutter %s] %s", label, stripped[:240])
+            now = time.time()
+            if now - started > timeout:
+                proc.kill()
+                raise TimeoutError(f"flutter 编译 {label} 超时（{timeout}s）")
+            if now - last_report >= progress_interval_sec:
+                elapsed = int(now - started)
+                report_tool_progress(
+                    f"编译 Flutter {label}",
+                    step=f"编译 Flutter {label}",
+                    detail=f"mode={mode}，已耗时 {elapsed}s…",
+                    status="running",
+                )
+                last_report = now
+        returncode = proc.wait(timeout=5)
+    except Exception:
+        if proc.poll() is None:
+            proc.kill()
+        raise
+
+    output = "".join(chunks)
+    result = subprocess.CompletedProcess(cmd, returncode, output, "")
+    logger.info("Flutter %s 编译完成，耗时 %.0fs", label, time.time() - started)
+    return result
+
+
 def build_flutter_hap(
     flutter_root: Path,
     *,
@@ -414,35 +509,22 @@ def build_flutter_hap(
     dart_defines: dict[str, str] | None = None,
     label: str = "",
 ) -> Path:
-    import os
-
-    load_dotenv(_PROJECT_ROOT / ".env", override=True)
-    flutter_bin = os.getenv("FLUTTER_BIN", shutil.which("flutter") or "flutter")
     flutter_root = flutter_root.expanduser().resolve()
     if not (flutter_root / "pubspec.yaml").is_file():
         raise FileNotFoundError(f"Flutter 工程不存在：{flutter_root}")
 
-    cmd = [flutter_bin, "build", "hap"]
-    if release:
-        cmd.append("--release")
+    # 关键：flutter build hap 默认就是 --release（含 Dart AOT），截图场景必须显式 --debug。
+    cmd = [_flutter_bin(), "build", "hap", "--release" if release else "--debug"]
+    if _flutter_should_skip_pub(flutter_root):
+        cmd.append("--no-pub")
     if dart_defines:
         for key, value in dart_defines.items():
             cmd.extend(["--dart-define", f"{key}={value}"])
 
     hint = label or "HAP"
-    logger.info("开始编译 Flutter %s（dart-define=%s）…", hint, dart_defines or {})
-    started = time.time()
-    proc = subprocess.run(
-        cmd,
-        cwd=str(flutter_root),
-        capture_output=True,
-        text=True,
-        timeout=900,
-        check=False,
-    )
-    logger.info("Flutter 编译完成，耗时 %.0fs", time.time() - started)
+    proc = _run_flutter_build(cmd, cwd=flutter_root, label=hint, timeout=900)
     if proc.returncode != 0:
-        tail = (proc.stdout + proc.stderr)[-5000:]
+        tail = (proc.stdout or "")[-5000:]
         raise RuntimeError(f"flutter build hap 失败 (code={proc.returncode}):\n{tail}")
 
     candidates = [
@@ -534,6 +616,35 @@ def _is_mostly_blank_image(path: Path) -> bool:
     return False
 
 
+def _image_similarity(a: Path, b: Path) -> float:
+    """粗粒度相似度 0~1（downsample + 像素差），用于识别品牌启动图。"""
+    try:
+        from PIL import Image, ImageChops, ImageStat
+    except ImportError:
+        return 0.0
+    if not a.is_file() or not b.is_file():
+        return 0.0
+    size = (90, 160)
+    img_a = Image.open(a).convert("RGB").resize(size)
+    img_b = Image.open(b).convert("RGB").resize(size)
+    diff = ImageChops.difference(img_a, img_b)
+    stat = ImageStat.Stat(diff)
+    # mean RGB 差越大越不像；255 归一
+    mean_diff = sum(stat.mean) / (3.0 * 255.0)
+    return max(0.0, min(1.0, 1.0 - mean_diff))
+
+
+def _looks_like_flutter_splash(path: Path, splash_refs: list[Path] | None) -> bool:
+    if not path.is_file():
+        return True
+    if _is_mostly_blank_image(path):
+        return True
+    for ref in splash_refs or []:
+        if _image_similarity(path, ref) >= FLUTTER_SPLASH_SIMILARITY:
+            return True
+    return False
+
+
 def capture_screenshot_png(output_png: Path) -> Path:
     logger.info("截屏 → %s", output_png.name)
     started = time.time()
@@ -571,37 +682,135 @@ def capture_screenshot_png_with_retry(output_png: Path) -> Path:
     return output_png
 
 
+def capture_flutter_screenshot_png(
+    output_png: Path,
+    *,
+    splash_refs: list[Path] | None = None,
+) -> Path:
+    """Flutter 专用：避开品牌启动图 / 加载中空白，轮询到主界面再落盘。"""
+    delay = FLUTTER_SPLASH_RETRY_DELAY_SEC
+    attempts = max(1, FLUTTER_SPLASH_RETRY_MAX)
+    last_md5 = ""
+    stable_hits = 0
+    for attempt in range(1, attempts + 1):
+        capture_screenshot_png(output_png)
+        digest = ""
+        try:
+            digest = output_png.read_bytes()[:4096].hex()  # cheap stability probe
+            # full md5 for stability
+            import hashlib
+
+            digest = hashlib.md5(output_png.read_bytes()).hexdigest()
+        except OSError:
+            digest = ""
+
+        splash_like = _looks_like_flutter_splash(output_png, splash_refs)
+        if not splash_like:
+            if digest and digest == last_md5:
+                stable_hits += 1
+            else:
+                stable_hits = 1
+                last_md5 = digest
+            # 非启动图且连续两帧稳定，或至少已非启动图
+            if stable_hits >= 2 or attempt >= 2:
+                if attempt > 1:
+                    logger.info(
+                        "Flutter 主界面截屏就绪（第 %d 次）: %s",
+                        attempt,
+                        output_png.name,
+                    )
+                return output_png
+            time.sleep(0.45)
+            continue
+
+        if attempt >= attempts:
+            logger.warning(
+                "Flutter 截屏仍像启动图/加载页，已用尽 %d 次: %s",
+                attempts,
+                output_png.name,
+            )
+            return output_png
+        logger.warning(
+            "检测到 Flutter 启动图/加载页，%.1fs 后重试 (%d/%d): %s",
+            delay,
+            attempt + 1,
+            attempts,
+            output_png.name,
+        )
+        time.sleep(delay)
+        delay = min(delay * 1.25, 4.0)
+        last_md5 = digest
+        stable_hits = 0
+    return output_png
+
+
 def build_entry_hap(project_root: Path | str) -> Path:
+    """在 ohos 工程根目录执行 hvigor assembleHap（Flutter 工程同样走这条，由 flutter-hvigor-plugin 编译 Dart）。"""
+    from app.tool_progress import report_tool_progress
+
     project_root = Path(project_root).expanduser().resolve()
     env = _reload_harmony_env()
     hvigorw = Path(env["hvigorw"])
     if not hvigorw.is_file():
         raise FileNotFoundError(f"hvigorw 未找到：{hvigorw}")
 
-    proc = subprocess.run(
-        [
-            str(hvigorw),
-            "assembleHap",
-            "-p",
-            "product=default",
-            "-p",
-            "module=entry@default",
-        ],
-        cwd=str(project_root),
-        capture_output=True,
-        text=True,
-        timeout=600,
-        check=False,
+    cmd = [
+        str(hvigorw),
+        "assembleHap",
+        "-p",
+        "product=default",
+        "-p",
+        "module=entry@default",
+    ]
+    logger.info("开始 hvigor assembleHap: %s", project_root)
+    report_tool_progress(
+        "编译 HAP",
+        step="编译 HAP",
+        detail=f"hvigor assembleHap @ {project_root.name}",
+        status="running",
     )
+    started = time.time()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(project_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    chunks: list[str] = []
+    assert proc.stdout is not None
+    last_report = started
+    while True:
+        line = proc.stdout.readline()
+        if not line and proc.poll() is not None:
+            break
+        if line:
+            chunks.append(line)
+        now = time.time()
+        if now - started > 600:
+            proc.kill()
+            raise TimeoutError("assembleHap 超时（600s）")
+        if now - last_report >= 15:
+            report_tool_progress(
+                "编译 HAP",
+                step="编译 HAP",
+                detail=f"hvigor 已运行 {int(now - started)}s…",
+                status="running",
+            )
+            last_report = now
+    returncode = proc.wait(timeout=5)
+    output = "".join(chunks)
+    logger.info("assembleHap 完成，耗时 %.0fs", time.time() - started)
+
     signed = project_root / "entry/build/default/outputs/default/entry-default-signed.hap"
     unsigned = project_root / "entry/build/default/outputs/default/entry-default-unsigned.hap"
     if signed.is_file():
         return signed
     if unsigned.is_file():
         return unsigned
-    if proc.returncode != 0:
-        tail = (proc.stdout + proc.stderr)[-4000:]
-        raise RuntimeError(f"assembleHap 失败 (code={proc.returncode}):\n{tail}")
+    if returncode != 0:
+        raise RuntimeError(f"assembleHap 失败 (code={returncode}):\n{output[-4000:]}")
     raise FileNotFoundError("未找到 entry-default-signed.hap 或 unsigned hap")
 
 
@@ -670,29 +879,18 @@ def build_flutter_app(
     release: bool = True,
 ) -> Path:
     """flutter build app 编译 Flutter OHOS .app 包。"""
-    load_dotenv(_PROJECT_ROOT / ".env", override=True)
-    flutter_bin = os.getenv("FLUTTER_BIN", shutil.which("flutter") or "flutter")
     flutter_root = flutter_root.expanduser().resolve()
     if not (flutter_root / "pubspec.yaml").is_file():
         raise FileNotFoundError(f"Flutter 工程不存在：{flutter_root}")
 
-    cmd = [flutter_bin, "build", "app"]
-    if release:
-        cmd.append("--release")
+    # 上架包必须显式 mode；默认 release。勿省略，避免与 hap 一样踩「默认 release」歧义。
+    cmd = [_flutter_bin(), "build", "app", "--release" if release else "--debug"]
+    if _flutter_should_skip_pub(flutter_root):
+        cmd.append("--no-pub")
 
-    logger.info("开始编译 Flutter APP 包（flutter build app）…")
-    started = time.time()
-    proc = subprocess.run(
-        cmd,
-        cwd=str(flutter_root),
-        capture_output=True,
-        text=True,
-        timeout=900,
-        check=False,
-    )
-    logger.info("Flutter APP 编译完成，耗时 %.0fs", time.time() - started)
+    proc = _run_flutter_build(cmd, cwd=flutter_root, label="APP", timeout=900)
     if proc.returncode != 0:
-        tail = (proc.stdout + proc.stderr)[-5000:]
+        tail = (proc.stdout or "")[-5000:]
         raise RuntimeError(f"flutter build app 失败 (code={proc.returncode}):\n{tail}")
 
     ohos_root = flutter_root / "ohos"

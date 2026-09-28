@@ -14,7 +14,7 @@ from app.config import APP_GALLERY_API_BASE_URL
 from app.tool_progress import report_tool_progress
 from app.tools.app_gallery_auth import build_api_client_headers, resolve_api_auth
 from app.tools.app_gallery_upload import upload_publish_file
-from app.tools.harmony_hdc import build_entry_app, build_flutter_app
+from app.tools.harmony_hdc import build_entry_app
 from app.tools.harmony_project_detect import ProjectKind, resolve_project_paths
 
 UPDATE_APP_PACKAGE_INFO_PATH = "/publish/v3/app-package-info"
@@ -27,30 +27,25 @@ def build_project_app_package(
     *,
     release: bool = True,
 ) -> dict[str, Any]:
-    """识别工程类型并编译 .app 包。"""
+    """识别工程类型并编译 .app 包。
+
+    Flutter OHOS 与原生/WebView 一样：只在 ohos 根目录跑 hvigor assembleApp
+   （flutter-hvigor-plugin 会在 hvigor 内拉起 Dart 编译，与 DevEco 一致）。
+    """
     resolved = resolve_project_paths(project_path)
     kind = resolved["projectKind"]
     ohos_root = resolved["ohosRoot"]
-    flutter_root = resolved["flutterRoot"]
+    if ohos_root is None:
+        raise FileNotFoundError(f"HarmonyOS 工程根目录未找到：{project_path}")
 
-    if kind == ProjectKind.FLUTTER_OHOS:
-        if flutter_root is None:
-            raise FileNotFoundError(f"Flutter 工程根目录未找到：{project_path}")
-        app_path = build_flutter_app(flutter_root, release=release)
-        build_root = flutter_root
-    else:
-        if ohos_root is None:
-            raise FileNotFoundError(f"HarmonyOS 工程根目录未找到：{project_path}")
-        app_path = build_entry_app(ohos_root, release=release)
-        build_root = ohos_root
-
+    app_path = build_entry_app(ohos_root, release=release)
     stat = app_path.stat()
     return {
         "appPath": str(app_path.resolve()),
         "fileName": app_path.name,
         "contentLength": stat.st_size,
         "projectKind": str(kind.value if hasattr(kind, "value") else kind),
-        "buildRoot": str(build_root.resolve()),
+        "buildRoot": str(ohos_root.resolve()),
     }
 
 
@@ -191,7 +186,7 @@ def update_app_gallery_build_update_app(
     """编译 HarmonyOS 工程并上传 .app 软件包到 AppGallery Connect。
 
     流程：
-    1. 识别工程类型并编译 .app（原生/WebView：`hvigorw assembleApp`；Flutter：`flutter build app`）
+    1. 识别工程类型并在 ohos 根目录编译 .app（统一 `hvigorw assembleApp`；Flutter 经 flutter-hvigor-plugin）
     2. GET /publish/v2/upload-url/for-obs 获取 OBS 上传地址（fileType=APP）
     3. PUT 上传 .app 到 OBS
     4. PUT /publish/v3/app-package-info 登记软件包（releasePhase 固定为 0）

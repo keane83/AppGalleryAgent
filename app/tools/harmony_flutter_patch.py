@@ -343,6 +343,123 @@ def _patch_auth_gate_for_screenshots(app_path: Path, flutter_root: Path) -> bool
     return changed
 
 
+def _find_home_shell_import(flutter_root: Path, shell_path: Path) -> str:
+    """生成 main.dart 可用的 HomeShell import。"""
+    rel = shell_path.relative_to(flutter_root / "lib").as_posix()
+    return f"import '{rel}';\n"
+
+
+def _patch_skip_splash_in_main(
+    main_path: Path,
+    flutter_root: Path,
+    shell_path: Path,
+) -> bool:
+    """截图模式跳过 SplashPage，直接进 Tab 壳（避免截到品牌启动图）。"""
+    original = main_path.read_text(encoding="utf-8")
+    if "HarmonyAutoScreenshot.screenshotMode" in original and "SplashPage" in original:
+        # 已是条件 home
+        if re.search(
+            r"home:\s*HarmonyAutoScreenshot\.screenshotMode\s*\?",
+            original,
+        ):
+            return False
+
+    splash_home = re.search(
+        r"home:\s*(?:const\s+)?SplashPage\s*\(([^)]*)\)\s*,",
+        original,
+    )
+    if not splash_home:
+        return False
+
+    # 推导壳层类名
+    shell_text = shell_path.read_text(encoding="utf-8", errors="ignore")
+    class_match = re.search(r"class\s+(\w+)\s+extends\s+StatefulWidget", shell_text)
+    shell_class = class_match.group(1) if class_match else "HomeShell"
+
+    import_line = _harmony_import_line(flutter_root)
+    shell_import = _find_home_shell_import(flutter_root, shell_path)
+    patched = _normalize_harmony_imports(original, import_line)
+    if shell_import.strip() not in patched:
+        # 插在 package/flutter imports 后
+        m = re.search(r"(import 'package:flutter/[^']+';\n)", patched)
+        if m:
+            patched = patched.replace(m.group(1), m.group(1) + shell_import, 1)
+        else:
+            patched = shell_import + patched
+
+    splash_args = splash_home.group(1).strip()
+    splash_ctor = f"SplashPage({splash_args})" if splash_args else "SplashPage()"
+    replacement = (
+        f"home: HarmonyAutoScreenshot.screenshotMode "
+        f"? const {shell_class}() "
+        f": {splash_ctor},"
+    )
+    # 重新匹配 patched 中的 SplashPage home（可能因 import 插入偏移）
+    splash_home2 = re.search(
+        r"home:\s*(?:const\s+)?SplashPage\s*\(([^)]*)\)\s*,",
+        patched,
+    )
+    if not splash_home2:
+        return False
+    patched = patched[: splash_home2.start()] + replacement + patched[splash_home2.end() :]
+
+    changed = patched != original
+    if changed:
+        backup = (
+            _backup_dir(flutter_root)
+            / f"{main_path.relative_to(flutter_root).as_posix().replace('/', '__')}.splash.bak"
+        )
+        if not backup.is_file():
+            shutil.copy2(main_path, backup)
+        main_path.write_text(patched, encoding="utf-8")
+    return changed
+
+
+def _patch_splash_page_skip(flutter_root: Path) -> bool:
+    """若存在 SplashPage，截图模式下将最短展示改为 0，尽快进主壳。"""
+    candidates = list(flutter_root.glob("lib/**/splash*.dart"))
+    changed_any = False
+    for path in candidates:
+        original = path.read_text(encoding="utf-8")
+        if "class SplashPage" not in original and "class SplashScreen" not in original:
+            continue
+        if "HarmonyAutoScreenshot.screenshotMode" in original and "Duration.zero" in original:
+            continue
+
+        import_line = _harmony_import_line(flutter_root)
+        patched = _normalize_harmony_imports(original, import_line)
+
+        patched2 = re.sub(
+            r"final minShow = Future<void>\.delayed\(const Duration\(milliseconds:\s*\d+\)\);",
+            "final minShow = Future<void>.delayed(\n"
+            "      HarmonyAutoScreenshot.screenshotMode\n"
+            "          ? Duration.zero\n"
+            "          : const Duration(milliseconds: 1100),\n"
+            "    );",
+            patched,
+            count=1,
+        )
+        if patched2 == patched:
+            patched2 = re.sub(
+                r"(final minShow = Future<void>\.delayed\()(const Duration\([^)]+\))(\);)",
+                r"\1HarmonyAutoScreenshot.screenshotMode ? Duration.zero : \2\3",
+                patched,
+                count=1,
+            )
+        if patched2 == patched:
+            continue
+
+        backup = (
+            _backup_dir(flutter_root)
+            / f"{path.relative_to(flutter_root).as_posix().replace('/', '__')}.splash_page.bak"
+        )
+        if not backup.is_file():
+            shutil.copy2(path, backup)
+        path.write_text(patched2, encoding="utf-8")
+        changed_any = True
+    return changed_any
+
+
 def ensure_flutter_screenshot_patch(
     flutter_root: Path,
     ohos_root: Path,
@@ -368,6 +485,9 @@ def ensure_flutter_screenshot_patch(
     if shell_changed:
         shell_path.write_text(patched_shell, encoding="utf-8")
 
+    splash_main_changed = _patch_skip_splash_in_main(main_path, flutter_root, shell_path)
+    splash_page_changed = _patch_splash_page_skip(flutter_root)
+
     app_changed = False
     app_path = _find_app_entry_dart(flutter_root)
     if app_path is not None:
@@ -376,7 +496,15 @@ def ensure_flutter_screenshot_patch(
     ohos_info = ensure_flutter_ohos_screenshot_patch(ohos_root)
 
     return {
-        "patched": helper_changed or main_changed or shell_changed or app_changed or ohos_info.get("patched"),
+        "patched": (
+            helper_changed
+            or main_changed
+            or shell_changed
+            or splash_main_changed
+            or splash_page_changed
+            or app_changed
+            or ohos_info.get("patched")
+        ),
         "mode": "runtime_method_channel",
         "helperPath": str(helper_path),
         "mainPath": str(main_path),
@@ -384,5 +512,6 @@ def ensure_flutter_screenshot_patch(
         "rootPagePath": str(shell_path),
         "appPath": str(app_path) if app_path else "",
         "backupPath": str(backup),
+        "splashSkipped": splash_main_changed or splash_page_changed,
         "ohos": ohos_info,
     }

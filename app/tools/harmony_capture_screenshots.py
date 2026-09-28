@@ -29,8 +29,8 @@ from app.tools.harmony_hdc import (
     WEBVIEW_FIRST_EXTRA_SETTLE_SEC,
     WEBVIEW_RENDER_SETTLE_SEC,
     build_entry_hap,
-    build_flutter_hap,
     WEBVIEW_POST_SCRIPT_WAIT_SEC,
+    capture_flutter_screenshot_png,
     capture_screenshot_png_with_retry,
     cold_start_and_wait,
     ensure_emulator_running,
@@ -109,13 +109,8 @@ def _build_and_install(
             return signed
         return None
 
-    if kind == ProjectKind.FLUTTER_OHOS:
-        if flutter_root is None:
-            raise FileNotFoundError("Flutter 工程根目录未找到（缺少 pubspec.yaml）")
-        hap_path = build_flutter_hap(flutter_root, release=False)
-    else:
-        hap_path = build_entry_hap(ohos_root)
-
+    # Flutter / 原生 / WebView 统一走 ohos 目录 hvigor（与 DevEco 一致，避免 flutter build）
+    hap_path = build_entry_hap(ohos_root)
     install_hap(hap_path)
     return hap_path
 
@@ -221,9 +216,21 @@ def _capture_flutter(
     bundle_name: str,
     shots: list[dict[str, object]],
     output_dir: Path,
+    flutter_root: Path | None = None,
     progress_step: Callable[..., None] | None = None,
 ) -> list[dict[str, str]]:
     captured: list[dict[str, str]] = []
+    splash_refs: list[Path] = []
+    if flutter_root is not None:
+        for rel in (
+            "assets/branding/splash_flutter.png",
+            "assets/branding/splash.png",
+            "assets/splash.png",
+            "assets/images/splash.png",
+        ):
+            candidate = flutter_root / rel
+            if candidate.is_file():
+                splash_refs.append(candidate)
 
     for idx, item in enumerate(shots):
         tab_index = int(item.get("tabIndex", 0))
@@ -243,6 +250,8 @@ def _capture_flutter(
                 status="running",
             )
 
+        # 首帧多等一会：Flutter 引擎冷启动 +（若未跳过）品牌启动页
+        extra = FIRST_SHOT_EXTRA_SETTLE_SEC if idx == 0 else max(1.0, FIRST_SHOT_EXTRA_SETTLE_SEC * 0.5)
         cold_start_and_wait(
             bundle_name,
             want_params={
@@ -250,9 +259,9 @@ def _capture_flutter(
                 "harmonyAutoScreenshot": "true",
             },
             render_settle_sec=FLUTTER_RENDER_SETTLE_SEC,
-            extra_settle_sec=FIRST_SHOT_EXTRA_SETTLE_SEC if idx == 0 else 0.0,
+            extra_settle_sec=extra,
         )
-        capture_screenshot_png_with_retry(png_path)
+        capture_flutter_screenshot_png(png_path, splash_refs=splash_refs)
 
         captured.append(
             {
@@ -397,6 +406,7 @@ def capture_harmony_screenshots(
             bundle_name=bundle_name,
             shots=shots,
             output_dir=output_dir,
+            flutter_root=flutter_root,
             progress_step=_step,
         )
     else:
