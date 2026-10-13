@@ -345,6 +345,9 @@ def wait_for_dialog_overlays_closed(page: Page, *, timeout_ms: int = 12_000) -> 
         page.wait_for_timeout(250)
 
 
+# AGC 升级后版本页右上角多为「保存草稿」，旧版仍可能是「保存」
+_VERSION_SAVE_BUTTON_TEXTS = ("保存草稿", "保存")
+
 _CLICK_VERSION_SAVE_JS = """
 () => {
   const visible = (el) => {
@@ -353,12 +356,22 @@ _CLICK_VERSION_SAVE_JS = """
     const s = window.getComputedStyle(el);
     return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0;
   };
+  const labels = ['保存草稿', '保存'];
   const saves = [...document.querySelectorAll('button, .el-button')].filter((btn) => {
-    return (btn.innerText || btn.textContent || '').trim() === '保存' && visible(btn);
+    const t = (btn.innerText || btn.textContent || '').replace(/\\s+/g, ' ').trim();
+    return labels.includes(t) && visible(btn);
   });
   if (!saves.length) return false;
-  saves.sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right);
-  const btn = saves.find((b) => b.getBoundingClientRect().top < 240) || saves[0];
+  // 优先「保存草稿」，再按右上角位置排序
+  const rank = (btn) => {
+    const t = (btn.innerText || btn.textContent || '').replace(/\\s+/g, ' ').trim();
+    const labelScore = t === '保存草稿' ? 2 : 1;
+    const r = btn.getBoundingClientRect();
+    const topScore = r.top < 240 ? 1 : 0;
+    return labelScore * 1e9 + topScore * 1e6 + r.right;
+  };
+  saves.sort((a, b) => rank(b) - rank(a));
+  const btn = saves[0];
   btn.scrollIntoView({ block: 'center', behavior: 'instant' });
   btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
   btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
@@ -370,7 +383,7 @@ _CLICK_VERSION_SAVE_JS = """
 
 
 def click_version_ready_submit_save(page: Page, *, timeout_ms: int = 12_000) -> None:
-    """版本「准备提交」页右上角「保存」（与隐私政策/年龄分级共用）。"""
+    """版本「准备提交」页右上角「保存草稿 / 保存」（隐私标签、隐私政策、年龄分级共用）。"""
     wait_for_dialog_overlays_closed(page, timeout_ms=min(timeout_ms, 12_000))
     content_frame = wait_for_version_detail_loaded(page, timeout_ms=min(timeout_ms, 20_000))
     page.wait_for_timeout(400)
@@ -384,7 +397,8 @@ def click_version_ready_submit_save(page: Page, *, timeout_ms: int = 12_000) -> 
 
     deadline = time.time() + timeout_ms / 1000
     last_error: Exception | None = None
-    save_pat = re.compile(r"^保存$")
+    # 优先匹配「保存草稿」，兼容旧文案「保存」
+    save_pat = re.compile(r"^保存草稿$|^保存$")
 
     while time.time() < deadline:
         for ctx in contexts:
@@ -395,24 +409,28 @@ def click_version_ready_submit_save(page: Page, *, timeout_ms: int = 12_000) -> 
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
 
-            for locator in (
-                ctx.locator("button:visible, .el-button:visible").filter(has_text=save_pat).last,
-                ctx.get_by_role("button", name=save_pat).last,
-                ctx.locator("button.el-button--primary:visible").filter(has_text=save_pat).last,
-            ):
-                try:
-                    if not locator.count():
-                        continue
-                    target = locator
-                    target.scroll_into_view_if_needed(timeout=2_000)
-                    target.click(timeout=3_000, force=True)
-                    page.wait_for_timeout(800)
-                    return
-                except Exception as exc:  # noqa: BLE001
-                    last_error = exc
+            for text in _VERSION_SAVE_BUTTON_TEXTS:
+                exact = re.compile(rf"^{re.escape(text)}$")
+                for locator in (
+                    ctx.locator("button:visible, .el-button:visible").filter(has_text=exact).last,
+                    ctx.get_by_role("button", name=exact).last,
+                    ctx.locator("button.el-button--primary:visible").filter(has_text=exact).last,
+                ):
+                    try:
+                        if not locator.count():
+                            continue
+                        target = locator
+                        target.scroll_into_view_if_needed(timeout=2_000)
+                        target.click(timeout=3_000, force=True)
+                        page.wait_for_timeout(800)
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = exc
         page.wait_for_timeout(300)
 
-    raise RuntimeError(f"未找到可点击的版本页「保存」按钮：{last_error}")
+    raise RuntimeError(
+        f"未找到可点击的版本页「保存草稿 / 保存」按钮：{last_error}"
+    )
 
 
 _VERSION_DETAIL_MARKERS = ("隐私政策", "内容分级", "年龄分级", "新版本 - 准备提交", "新版本")
