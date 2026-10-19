@@ -7,7 +7,8 @@ import re
 TOOL_STEP_LABELS: dict[str, str] = {
     "create_app_gallery_app_id": "步骤 1",
     "create_app_gallery_provision": "步骤 2",
-    "create_app_gallery_publish_app": "步骤 3",
+    # AGC 官网改版后第 3 步已停用。恢复时取消注释。
+    # "create_app_gallery_publish_app": "步骤 3",
     "configure_harmony_app_signing": "步骤 4",
     "replace_harmony_app_icon": "步骤 4b",
     "capture_harmony_screenshots_and_app_icon": "步骤 5",
@@ -22,7 +23,7 @@ TOOL_STEP_LABELS: dict[str, str] = {
 TOOL_USER_LABELS: dict[str, str] = {
     "create_app_gallery_app_id": "创建 APP ID",
     "create_app_gallery_provision": "申请 Profile 并下载",
-    "create_app_gallery_publish_app": "控制台新建发布",
+    # "create_app_gallery_publish_app": "控制台新建发布",
     "configure_harmony_app_signing": "配置工程签名",
     "replace_harmony_app_icon": "替换应用图标",
     "capture_harmony_screenshots_and_app_icon": "截取商店截图与图标",

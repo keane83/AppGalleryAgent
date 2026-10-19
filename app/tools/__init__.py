@@ -7,7 +7,8 @@ from app.tools.app_gallery_configure_privacy_agreement import (
 )
 from app.tools.app_gallery_create_appid import create_app_gallery_app_id
 from app.tools.app_gallery_create_provision import create_app_gallery_provision
-from app.tools.app_gallery_create_publish_app import create_app_gallery_publish_app
+# AGC 官网改版后不再需要「新建发布」。实现保留在 app_gallery_create_publish_app.py。
+# from app.tools.app_gallery_create_publish_app import create_app_gallery_publish_app
 from app.tools.app_gallery_build_update_app import update_app_gallery_build_update_app
 from app.tools.app_gallery_update_app_file_info import update_app_gallery_app_file_info
 from app.tools.app_gallery_update_app_info import update_app_gallery_app_basic_info
@@ -22,7 +23,7 @@ TOOLS = [
     get_app_gallery_access_token,
     create_app_gallery_app_id,
     create_app_gallery_provision,
-    create_app_gallery_publish_app,
+    # create_app_gallery_publish_app,
     configure_app_gallery_privacy_agreement,
     configure_app_gallery_age_rating,
     update_app_gallery_app_file_info,
@@ -37,7 +38,7 @@ __all__ = [
     "TOOLS",
     "create_app_gallery_app_id",
     "create_app_gallery_provision",
-    "create_app_gallery_publish_app",
+    # "create_app_gallery_publish_app",
     "configure_app_gallery_privacy_agreement",
     "configure_app_gallery_age_rating",
     "update_app_gallery_app_file_info",

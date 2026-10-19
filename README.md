@@ -48,13 +48,12 @@ python -m app.tools.agc_browser_login
 
 ## Agent 工具一览
 
-共 **11 个** Tool。API 类工具内部会自动换取 `access_token`，一般**不必**每次手动调用 `get_app_gallery_access_token`。
+当前注册 **11 个** Tool（`create_app_gallery_publish_app` 已停用，未计入）。API 类工具内部会自动换取 `access_token`，一般**不必**每次手动调用 `get_app_gallery_access_token`。
 
 ### 推荐上架顺序
 
 1. `create_app_gallery_app_id`
 2. `create_app_gallery_provision`
-3. `create_app_gallery_publish_app`
 4. `configure_harmony_app_signing`
 5. `capture_harmony_screenshots_and_app_icon`
 6. `update_app_gallery_app_file_info`
@@ -101,7 +100,9 @@ python -m app.tools.agc_browser_login
 
 ---
 
-### 4. `create_app_gallery_publish_app`
+### 4. `create_app_gallery_publish_app`（已停用）
+
+AGC 官网改版后不再需要控制台「新建发布」。工具实现仍在 `app/tools/app_gallery_create_publish_app.py`，注册与全流程调用已注释，需要时可恢复。
 
 **功能**：浏览器在 AGC 控制台 **「新建发布」**，按包名创建发布应用。
 

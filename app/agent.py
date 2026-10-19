@@ -72,7 +72,8 @@ _PREMATURE_COMPLETION_MARKERS: tuple[str, ...] = (
 FULL_FLOW_TOOL_SEQUENCE: tuple[str, ...] = (
     "create_app_gallery_app_id",
     "create_app_gallery_provision",
-    "create_app_gallery_publish_app",
+    # AGC 官网改版后不再需要控制台「新建发布」。恢复时取消下一行注释，并重新注册工具。
+    # "create_app_gallery_publish_app",
     "configure_harmony_app_signing",
     "capture_harmony_screenshots_and_app_icon",
     "update_app_gallery_app_file_info",
@@ -124,19 +125,20 @@ def _tool_mentioned_in_message(user_message: str, tool_name: str) -> bool:
                 "create_app_gallery_provision",
             )
         )
-    if tool_name == "create_app_gallery_publish_app":
-        return any(
-            key in text
-            for key in (
-                "新建发布",
-                "创建发布",
-                "发布应用",
-                "控制台发布",
-                "第3步",
-                "第 3 步",
-                "create_app_gallery_publish",
-            )
-        )
+    # AGC 官网改版后第 3 步已停用。恢复全流程时取消注释，并重新注册工具。
+    # if tool_name == "create_app_gallery_publish_app":
+    #     return any(
+    #         key in text
+    #         for key in (
+    #             "新建发布",
+    #             "创建发布",
+    #             "发布应用",
+    #             "控制台发布",
+    #             "第3步",
+    #             "第 3 步",
+    #             "create_app_gallery_publish",
+    #         )
+    #     )
     if tool_name == "configure_harmony_app_signing":
         return any(
             key in text
