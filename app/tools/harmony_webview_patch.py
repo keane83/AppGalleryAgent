@@ -26,25 +26,49 @@ def _backup_file(source: Path, project_root: Path, name: str) -> Path:
     return backup
 
 
-def _ensure_bridge_file(ohos_root: Path) -> Path:
-    bridge = ohos_root / BRIDGE_REL
-    bridge.parent.mkdir(parents=True, exist_ok=True)
-    content = """// harmony-auto: webview screenshot bridge
+def _minimal_bridge_source() -> str:
+    return """// harmony-auto: webview screenshot bridge
 export class HarmonyAutoBridge {
   static scriptIdx: number = -1;
 }
 """
-    if not bridge.is_file() or bridge.read_text(encoding="utf-8") != content:
-        bridge.write_text(content, encoding="utf-8")
-        return bridge
-    return bridge
+
+
+def _ensure_bridge_file(ohos_root: Path) -> tuple[Path, bool]:
+    """确保 HarmonyAutoBridge 含 scriptIdx；勿覆盖 JingPin 等工程的完整 Bridge。"""
+    bridge = ohos_root / BRIDGE_REL
+    bridge.parent.mkdir(parents=True, exist_ok=True)
+    if not bridge.is_file():
+        bridge.write_text(_minimal_bridge_source(), encoding="utf-8")
+        return bridge, True
+
+    text = bridge.read_text(encoding="utf-8")
+    if "static scriptIdx" in text:
+        return bridge, False
+
+    if "export class HarmonyAutoBridge" not in text:
+        _backup_file(bridge, ohos_root, "HarmonyAutoBridge.webview.bak")
+        bridge.write_text(_minimal_bridge_source(), encoding="utf-8")
+        return bridge, True
+
+    merged = re.sub(
+        r"(export class HarmonyAutoBridge\s*\{)",
+        r"\1\n  static scriptIdx: number = -1;",
+        text,
+        count=1,
+    )
+    if merged == text:
+        return bridge, False
+    _backup_file(bridge, ohos_root, "HarmonyAutoBridge.webview.bak")
+    bridge.write_text(merged, encoding="utf-8")
+    return bridge, True
 
 
 def ensure_webview_patches(ohos_root: Path, scripts: list[str]) -> dict[str, object]:
     from app.tools.harmony_webview_planner import write_webview_scripts_file
 
     scripts_path = write_webview_scripts_file(ohos_root, scripts)
-    bridge_path = _ensure_bridge_file(ohos_root)
+    bridge_path, bridge_changed = _ensure_bridge_file(ohos_root)
     entry = find_entry_ability(ohos_root)
     index = find_index_ets(ohos_root)
 
@@ -55,7 +79,7 @@ def ensure_webview_patches(ohos_root: Path, scripts: list[str]) -> dict[str, obj
     index_changed = _patch_index_ets(index)
 
     return {
-        "patched": entry_changed or index_changed,
+        "patched": entry_changed or index_changed or bridge_changed,
         "scriptsPath": str(scripts_path),
         "bridgePath": str(bridge_path),
         "entryAbilityPath": str(entry),

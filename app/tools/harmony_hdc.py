@@ -39,6 +39,19 @@ WEBVIEW_ACTION_EXTRA_WAIT_SEC = float(os.getenv("HARMONY_WEBVIEW_ACTION_EXTRA_WA
 WEBVIEW_POST_SCRIPT_WAIT_SEC = float(os.getenv("HARMONY_WEBVIEW_POST_SCRIPT_WAIT_SEC", "2.5"))
 SCREENSHOT_BLANK_RETRY_DELAY_SEC = float(os.getenv("HARMONY_SCREENSHOT_BLANK_RETRY_DELAY_SEC", "2.5"))
 SCREENSHOT_BLANK_RETRY_MAX = int(os.getenv("HARMONY_SCREENSHOT_BLANK_RETRY_MAX", "3"))
+SCREENSHOT_USE_UITEST = os.getenv("HARMONY_SCREENSHOT_USE_UITEST", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+SCREENSHOT_FAIL_ON_INVALID = os.getenv("HARMONY_SCREENSHOT_FAIL_ON_INVALID", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+SCREENSHOT_BLACK_RATIO_THRESHOLD = float(os.getenv("HARMONY_SCREENSHOT_BLACK_RATIO", "0.85"))
 
 # 兼容旧引用
 PAGE_RENDER_WAIT_SEC = PAGE_RENDER_SETTLE_SEC
@@ -47,6 +60,12 @@ WEBVIEW_RENDER_WAIT_SEC = WEBVIEW_RENDER_SETTLE_SEC
 WEBVIEW_FIRST_SCREEN_WAIT_SEC = WEBVIEW_FIRST_EXTRA_SETTLE_SEC
 
 _HARMONY_ENV_CACHE: dict[str, str] | None = None
+_HDC_SELECTED_TARGET: str | None = None
+
+
+def _hdc_emulator_addrs() -> list[str]:
+    raw = (os.getenv("HARMONY_HDC_EMULATOR_ADDR") or "127.0.0.1:5555").strip()
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def _reload_harmony_env(*, force: bool = False) -> dict[str, str]:
@@ -78,12 +97,17 @@ def _reload_harmony_env(*, force: bool = False) -> dict[str, str]:
     return env
 
 
-def run_hdc(*args: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+def _hdc_executable() -> str:
     env = _reload_harmony_env()
     hdc = env["hdc"]
     if not Path(hdc).is_file() and not shutil.which(hdc):
         raise FileNotFoundError(f"hdc 未找到：{hdc}")
-    cmd = [hdc, *args]
+    return hdc
+
+
+def _run_hdc_raw(*args: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    """不附带 -t connect-key（用于 list targets / tconn / start -r）。"""
+    cmd = [_hdc_executable(), *args]
     return subprocess.run(
         cmd,
         capture_output=True,
@@ -93,17 +117,122 @@ def run_hdc(*args: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
     )
 
 
-def list_targets() -> list[str]:
-    proc = run_hdc("list", "targets")
+def _list_targets_raw() -> list[str]:
+    proc = _run_hdc_raw("list", "targets", timeout=30)
     lines = (proc.stdout or "").splitlines()
-    targets = [line.strip() for line in lines if line.strip() and "Empty" not in line]
+    return [line.strip() for line in lines if line.strip() and "Empty" not in line]
+
+
+def _try_tconn_emulator() -> bool:
+    """DevEco 手动启动的模拟器常需 tconn 后 hdc 才能 list 到设备。"""
+    for addr in _hdc_emulator_addrs():
+        proc = _run_hdc_raw("tconn", addr, timeout=45)
+        hint = (proc.stdout or proc.stderr or "").strip()
+        if hint:
+            logger.info("hdc tconn %s: %s", addr, hint[:200])
+        if _list_targets_raw():
+            return True
+    return False
+
+
+def _hdc_output_needs_connect_key(text: str) -> bool:
+    lowered = text.lower()
+    return "connect-key" in lowered or "need connect" in lowered
+
+
+def _select_hdc_target(*, force_refresh: bool = False) -> str | None:
+    global _HDC_SELECTED_TARGET
+    if not force_refresh and _HDC_SELECTED_TARGET:
+        if _HDC_SELECTED_TARGET in _list_targets_raw():
+            return _HDC_SELECTED_TARGET
+
+    env_target = (os.getenv("HARMONY_HDC_TARGET") or "").strip()
+    targets = _list_targets_raw()
+    if not targets:
+        _try_tconn_emulator()
+        targets = _list_targets_raw()
+    if not targets:
+        _HDC_SELECTED_TARGET = None
+        return None
+
+    if env_target and env_target in targets:
+        chosen = env_target
+    else:
+        chosen = targets[0]
+        if len(targets) > 1:
+            logger.warning("检测到多个 hdc 设备，使用 %s（全部：%s）", chosen, targets)
+
+    _HDC_SELECTED_TARGET = chosen
+    return chosen
+
+
+def ensure_hdc_device() -> str:
+    """确保 hdc 已选中可用 connect-key（模拟器/真机）。"""
+    target = _select_hdc_target(force_refresh=True)
+    if target:
+        return target
+    addrs = ", ".join(_hdc_emulator_addrs())
+    raise RuntimeError(
+        "hdc 未连接任何设备（list targets 为空）。"
+        "若已在 DevEco 里启动模拟器，请在终端执行："
+        f"hdc tconn {addrs.split(',')[0].strip()}，"
+        "然后 hdc list targets 应出现 127.0.0.1:5555。"
+        "也可在 .env 设置 HARMONY_HDC_EMULATOR_ADDR 或 HARMONY_HDC_TARGET。"
+    )
+
+
+def run_hdc(
+    *args: str,
+    timeout: int = 120,
+    _allow_retry: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    global _HDC_SELECTED_TARGET
+    _select_hdc_target()
+    hdc = _hdc_executable()
+    cmd = [hdc]
+    if _HDC_SELECTED_TARGET:
+        cmd.extend(["-t", _HDC_SELECTED_TARGET])
+    cmd.extend(args)
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    combined = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    if _allow_retry and _hdc_output_needs_connect_key(combined):
+        logger.warning("hdc 报 connect-key，尝试 tconn 并重试命令…")
+        _HDC_SELECTED_TARGET = None
+        _try_tconn_emulator()
+        _select_hdc_target(force_refresh=True)
+        if _HDC_SELECTED_TARGET:
+            retry_cmd = [hdc, "-t", _HDC_SELECTED_TARGET, *args]
+            proc = subprocess.run(
+                retry_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+    return proc
+
+
+def list_targets() -> list[str]:
+    targets = _list_targets_raw()
+    if targets:
+        _select_hdc_target()
     return targets
 
 
 def _restart_hdc_server() -> None:
-    proc = run_hdc("start", "-r", timeout=15)
+    global _HDC_SELECTED_TARGET
+    proc = _run_hdc_raw("start", "-r", timeout=15)
+    _HDC_SELECTED_TARGET = None
     if proc.returncode != 0:
         logger.warning("hdc start -r 失败: %s", (proc.stderr or proc.stdout or "").strip())
+    _try_tconn_emulator()
+    _select_hdc_target(force_refresh=True)
 
 
 def _list_emulator_instances() -> list[dict[str, Any]]:
@@ -195,7 +324,8 @@ def wait_for_device(
         if poll % 5 == 0:
             _restart_hdc_server()
             if emulator_name and _is_emulator_running(emulator_name):
-                logger.info("模拟器 %s 进程已运行，等待 hdc 连接…", emulator_name)
+                logger.info("模拟器 %s 进程已运行，尝试 hdc tconn…", emulator_name)
+                _try_tconn_emulator()
             else:
                 logger.info("等待模拟器启动并建立 hdc 连接…")
 
@@ -215,10 +345,14 @@ def wait_for_device(
 
 def ensure_emulator_running() -> str:
     """确保 hdc 可用：已有设备则复用，否则自动启动 .env 配置的模拟器。"""
-    targets = list_targets()
+    targets = _list_targets_raw()
+    if not targets:
+        _try_tconn_emulator()
+        targets = _list_targets_raw()
     if targets:
-        logger.info("复用已连接 hdc 设备：%s", targets[0])
-        return targets[0]
+        target = _select_hdc_target(force_refresh=True) or targets[0]
+        logger.info("复用已连接 hdc 设备：%s", target)
+        return target
 
     env = _reload_harmony_env()
     emulator_bin = Path(env["emulator"])
@@ -243,8 +377,10 @@ def ensure_emulator_running() -> str:
     if not _is_emulator_running(avd):
         _start_emulator(emulator_bin, avd)
     else:
-        logger.info("模拟器 %s 已在运行，等待 hdc 连接", avd)
-        _restart_hdc_server()
+        logger.info("模拟器 %s 已在运行，尝试 hdc tconn 并等待连接", avd)
+        _try_tconn_emulator()
+        if not _list_targets_raw():
+            _restart_hdc_server()
 
     return wait_for_device(emulator_name=avd)
 
@@ -296,6 +432,7 @@ def cold_start_and_wait(
     extra_settle_sec: float = 0.0,
 ) -> None:
     """冷启动应用，轮询确认进入前台后再短暂等待渲染稳定。"""
+    ensure_hdc_device()
     logger.info("冷启动 %s …", bundle_name)
     force_stop_app(bundle_name)
     time.sleep(0.4)
@@ -543,6 +680,7 @@ def install_hap(hap_path: Path) -> None:
     hap_path = hap_path.resolve()
     if not hap_path.is_file():
         raise FileNotFoundError(f"HAP 不存在：{hap_path}")
+    ensure_hdc_device()
     logger.info("安装 HAP: %s", hap_path.name)
     started = time.time()
     proc = run_hdc("install", str(hap_path), timeout=180)
@@ -590,30 +728,131 @@ def jpeg_to_png(jpeg_path: Path, png_path: Path) -> None:
         raise RuntimeError(f"JPEG 转 PNG 失败: {proc.stdout} {proc.stderr}")
 
 
-def _is_mostly_blank_image(path: Path) -> bool:
-    """检测截图是否接近纯白/未渲染（低对比度空白）。"""
+def _analyze_screenshot_image(path: Path) -> dict[str, float | str | bool]:
+    """粗采样统计截图质量（白屏 / 黑屏 / 低对比度）。"""
+    empty: dict[str, float | str | bool] = {
+        "black_ratio": 1.0,
+        "white_ratio": 0.0,
+        "max_stddev": 0.0,
+        "invalid": True,
+        "reason": "missing_or_tiny",
+    }
     try:
         from PIL import Image, ImageStat
     except ImportError:
-        return False
+        return {**empty, "reason": "no_pillow"}
 
     if not path.is_file() or path.stat().st_size < 1024:
-        return True
+        return empty
 
     img = Image.open(path).convert("RGB")
     sample = img.resize((180, 320))
-    pixels = list(sample.getdata())
-    if not pixels:
-        return True
-
+    try:
+        raw = sample.get_flattened_data()
+        if raw and isinstance(raw[0], (tuple, list)):
+            pixels = [tuple(p[:3]) for p in raw]
+        else:
+            pixels = [(raw[i], raw[i + 1], raw[i + 2]) for i in range(0, len(raw), 3)]
+    except (AttributeError, TypeError, IndexError):
+        pixels = list(sample.getdata())
+    total = len(pixels)
     whiteish = sum(1 for r, g, b in pixels if r > 250 and g > 250 and b > 250)
-    if whiteish / len(pixels) > 0.88:
-        return True
-
+    blackish = sum(1 for r, g, b in pixels if r < 15 and g < 15 and b < 15)
+    white_ratio = whiteish / total
+    black_ratio = blackish / total
     stat = ImageStat.Stat(sample)
-    if max(stat.stddev) < 5.0:
-        return True
-    return False
+    max_stddev = max(stat.stddev)
+
+    reason = ""
+    invalid = False
+    if black_ratio >= SCREENSHOT_BLACK_RATIO_THRESHOLD:
+        invalid = True
+        reason = "mostly_black"
+    elif white_ratio > 0.88:
+        invalid = True
+        reason = "mostly_white"
+    elif max_stddev < 5.0:
+        invalid = True
+        reason = "low_contrast"
+
+    return {
+        "black_ratio": black_ratio,
+        "white_ratio": white_ratio,
+        "max_stddev": max_stddev,
+        "invalid": invalid,
+        "reason": reason,
+    }
+
+
+def _is_mostly_blank_image(path: Path) -> bool:
+    """检测截图是否无效（白屏、黑屏或低对比度未渲染）。"""
+    stats = _analyze_screenshot_image(path)
+    return bool(stats.get("invalid"))
+
+
+def _invalid_screenshot_message(path: Path, stats: dict[str, float | str | bool]) -> str:
+    reason = str(stats.get("reason") or "invalid")
+    black_ratio = float(stats.get("black_ratio") or 0.0)
+    if reason == "mostly_black":
+        return (
+            f"截屏为纯黑（黑像素约 {black_ratio:.0%}）：模拟器内 snapshot/uitest 未读到真实画面，"
+            "但你在 Emulator 窗口里可能仍能看到 App。"
+            "请完全退出并冷启动模拟器（必要时 Wipe Data），执行 `hdc start -r` 后重试；"
+            "或在真机上用 hdc 连接再截图。"
+        )
+    if reason == "mostly_white":
+        return "截屏接近纯白，页面可能尚未渲染完成，可加大 HARMONY_WEBVIEW_RENDER_WAIT_SEC 后重试。"
+    if reason == "low_contrast":
+        return "截屏对比度过低（像空白/启动页），请延长渲染等待或检查是否停在 Splash。"
+    return f"截屏无效（{reason}）：{path.name}"
+
+
+def _recover_snapshot_pipeline() -> None:
+    """黑屏/空白时尝试恢复 hdc 与 uitest 截屏通道。"""
+    logger.warning("尝试恢复模拟器截屏通道（hdc 重启 + 唤醒 + uitest）…")
+    _restart_hdc_server()
+    time.sleep(1.2)
+    run_hdc("shell", "power-shell", "wakeup", timeout=15)
+    ensure_uitest_ready()
+    time.sleep(1.5)
+
+
+def _resize_png_to_store_size(png_path: Path) -> None:
+    """商店截图目标 1080×1920。"""
+    proc = subprocess.run(
+        [
+            "sips",
+            "-z",
+            str(SCREENSHOT_HEIGHT),
+            str(SCREENSHOT_WIDTH),
+            str(png_path),
+            "--out",
+            str(png_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"缩放截图失败: {proc.stdout} {proc.stderr}")
+
+
+def capture_display_png_uitest(local_png: Path) -> bool:
+    """uitest screenCap（优先于 snapshot_display，部分系统镜像更稳）。"""
+    remote = "/data/local/tmp/harmony_auto_uitest.png"
+    ensure_uitest_ready()
+    proc = run_hdc("shell", "uitest", "screenCap", "-p", remote, timeout=60)
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    if proc.returncode != 0 and "ScreenCap saved" not in combined:
+        logger.warning("uitest screenCap 失败: %s", combined.strip()[:240])
+        return False
+
+    local_png.parent.mkdir(parents=True, exist_ok=True)
+    recv = run_hdc("file", "recv", remote, str(local_png), timeout=120)
+    if recv.returncode != 0 or not local_png.is_file():
+        logger.warning("拉取 uitest 截图失败: %s", (recv.stdout or recv.stderr or "").strip()[:240])
+        return False
+    return True
 
 
 def _image_similarity(a: Path, b: Path) -> float:
@@ -645,38 +884,78 @@ def _looks_like_flutter_splash(path: Path, splash_refs: list[Path] | None) -> bo
     return False
 
 
-def capture_screenshot_png(output_png: Path) -> Path:
-    logger.info("截屏 → %s", output_png.name)
-    started = time.time()
+def _capture_screenshot_png_once(output_png: Path) -> None:
+    """单次截屏：uitest PNG 优先，失败则 snapshot_display + 转 PNG。"""
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    tmp_full = output_png.with_name(output_png.stem + "_full.png")
+
+    if SCREENSHOT_USE_UITEST and capture_display_png_uitest(tmp_full):
+        shutil.copy2(tmp_full, output_png)
+        if tmp_full.is_file() and tmp_full != output_png:
+            tmp_full.unlink()
+        _resize_png_to_store_size(output_png)
+        return
+
     tmp_jpeg = output_png.with_suffix(".jpeg")
     capture_display_jpeg(tmp_jpeg)
     jpeg_to_png(tmp_jpeg, output_png)
     if tmp_jpeg.is_file():
         tmp_jpeg.unlink()
-    logger.info("截屏完成 %.1fs: %s", time.time() - started, output_png.name)
+    if tmp_full.is_file():
+        tmp_full.unlink()
+
+
+def capture_screenshot_png(output_png: Path) -> Path:
+    logger.info("截屏 → %s", output_png.name)
+    started = time.time()
+    _capture_screenshot_png_once(output_png)
+    stats = _analyze_screenshot_image(output_png)
+    logger.info(
+        "截屏完成 %.1fs: %s（black=%.0f%% white=%.0f%% invalid=%s）",
+        time.time() - started,
+        output_png.name,
+        float(stats.get("black_ratio", 0)) * 100,
+        float(stats.get("white_ratio", 0)) * 100,
+        stats.get("invalid"),
+    )
     return output_png
 
 
 def capture_screenshot_png_with_retry(output_png: Path) -> Path:
-    """截屏并在检测到空白图时延长等待后重试。"""
+    """截屏；无效（黑/白/低对比）时恢复 hdc 并延长等待后重试。"""
     delay = SCREENSHOT_BLANK_RETRY_DELAY_SEC
     attempts = max(1, SCREENSHOT_BLANK_RETRY_MAX)
+    last_stats: dict[str, float | str | bool] = {}
+
     for attempt in range(1, attempts + 1):
         capture_screenshot_png(output_png)
-        if not _is_mostly_blank_image(output_png):
+        last_stats = _analyze_screenshot_image(output_png)
+        if not last_stats.get("invalid"):
             if attempt > 1:
                 logger.info("重试截屏成功（第 %d 次）: %s", attempt, output_png.name)
             return output_png
-        if attempt >= attempts:
-            logger.warning("截屏仍偏空白，已用尽 %d 次重试: %s", attempts, output_png.name)
-            return output_png
+
+        reason = str(last_stats.get("reason") or "")
         logger.warning(
-            "截屏偏空白，%.1fs 后重试 (%d/%d): %s",
-            delay,
-            attempt + 1,
+            "截屏无效（%s，黑=%.0f%% 白=%.0f%%）(%d/%d): %s",
+            reason,
+            float(last_stats.get("black_ratio", 0)) * 100,
+            float(last_stats.get("white_ratio", 0)) * 100,
+            attempt,
             attempts,
             output_png.name,
         )
+
+        if attempt >= attempts:
+            msg = _invalid_screenshot_message(output_png, last_stats)
+            if SCREENSHOT_FAIL_ON_INVALID:
+                raise RuntimeError(msg)
+            logger.warning("截屏仍无效，已用尽 %d 次重试: %s", attempts, msg)
+            return output_png
+
+        if reason == "mostly_black":
+            _recover_snapshot_pipeline()
+            delay = max(delay, 3.0)
         time.sleep(delay)
         delay = min(delay * 1.5, 8.0)
     return output_png

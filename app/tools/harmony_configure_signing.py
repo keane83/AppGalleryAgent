@@ -228,9 +228,11 @@ def _replace_signing_configs(content: str, material: dict[str, str]) -> str:
 
 
 def _ensure_product_signing_config(content: str) -> str:
-    if '"signingConfig"' in content:
+    if re.search(r'"products"\s*:\s*\[[\s\S]*?"signingConfig"\s*:', content):
         return content
-    pattern = re.compile(r'("name"\s*:\s*"default"\s*,)')
+    pattern = re.compile(
+        r'("products"\s*:\s*\[\s*\{\s*"name"\s*:\s*"default"\s*,)'
+    )
     if not pattern.search(content):
         raise ValueError("build-profile.json5 中未找到 default product")
     return pattern.sub(r'\1\n        "signingConfig": "default",', content, count=1)

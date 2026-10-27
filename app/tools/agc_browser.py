@@ -133,16 +133,133 @@ def ensure_agc_logged_in(
         )
 
 
+def _app_list_scopes(page: Page) -> list[Page | Frame]:
+    """APP ID 表格可能在主页面，也可能在 iframe。"""
+    scopes: list[Page | Frame] = []
+    seen: set[int] = set()
+    for scope in (page, *list(page.frames)):
+        key = id(scope)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if scope.locator(".el-table__body-wrapper span.app-name-text").count():
+                scopes.append(scope)
+        except Exception:  # noqa: BLE001
+            continue
+    return scopes
+
+
+def _is_new_app_id_list(page: Page) -> bool:
+    """新版列表：行内有 span.app-name-text，操作列是「开发 / 分发 / 分析」。"""
+    if _app_list_scopes(page):
+        return True
+    try:
+        search = page.locator("input[placeholder*='包名或应用名称']").first
+        if search.count() and search.is_visible(timeout=400):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _match_app_row(scope: Page | Frame, app_name: str, bundle_id: str) -> Locator | None:
+    """按包名 .cs-text-ellipsis 或名称 span.app-name-text 定位行。DOM 里是全文，不是省略号。"""
+    rows = scope.locator(".el-table__body-wrapper tbody tr.el-table__row")
+    if bundle_id:
+        matched = rows.filter(
+            has=scope.locator(".cs-text-ellipsis", has_text=re.compile(rf"^{re.escape(bundle_id)}$"))
+        )
+        if matched.count():
+            return matched.first
+    if app_name:
+        matched = rows.filter(
+            has=scope.locator("span.app-name-text", has_text=re.compile(rf"^{re.escape(app_name)}$"))
+        )
+        if matched.count():
+            return matched.first
+    return None
+
+
+def _search_app_list(scope: Page | Frame, query: str) -> None:
+    box = scope.locator("input[placeholder*='包名或应用名称']").first
+    if not box.count():
+        return
+    box.click(timeout=2_000)
+    box.fill("", timeout=2_000)
+    box.fill(query, timeout=2_000)
+    box.press("Enter")
+    box.page.wait_for_timeout(700)
+
+
+def _click_row_develop(row: Locator) -> None:
+    """点击该行操作列里的「开发」。
+
+    列表在 hdc-console 的 iframe 里，a.el-link 没有 href。
+    外层欢迎浮层会挡住 Playwright 的真实点击；force 点击也不会触发 Vue 跳转。
+    必须在 iframe 内对该 <a> 派发 click 事件。
+    """
+    link = row.locator("a.el-link").filter(has_text=re.compile(r"^\s*开发\s*$")).first
+    link.wait_for(state="attached", timeout=5_000)
+    clicked = link.evaluate(
+        """(el) => {
+          el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+          return (el.innerText || '').replace(/\\s+/g, '').trim() === '开发';
+        }"""
+    )
+    if not clicked:
+        raise RuntimeError("该行没有可点击的「开发」链接")
+
+
+def _open_app_from_app_id_list(page: Page, app_name: str, bundle_id: str) -> None:
+    """新版 APP ID 列表：找到应用行后点击「开发」，不点应用名、不点分发。"""
+    scopes = _app_list_scopes(page) or [page]
+    row: Locator | None = None
+    for scope in scopes:
+        row = _match_app_row(scope, app_name, bundle_id)
+        if row is not None:
+            break
+
+    if row is None:
+        query = bundle_id or app_name
+        for scope in scopes:
+            try:
+                _search_app_list(scope, query)
+            except Exception:  # noqa: BLE001
+                continue
+            row = _match_app_row(scope, app_name, bundle_id)
+            if row is not None:
+                break
+
+    if row is None:
+        raise RuntimeError(
+            "已打开新版 APP ID 列表，但没有匹配到应用行（不是登录失效）。"
+            f"名称「{app_name or '未提供'}」包名「{bundle_id or '未提供'}」。当前地址：{page.url}"
+        )
+
+    _click_row_develop(row)
+    page.wait_for_timeout(600)
+    wait_for_app_detail_ready(page)
+
+
 def open_harmony_app_from_myapp_list(
     page: Page,
     app_name: str,
     bundle_id: str = "",
 ) -> None:
-    """在 myApp → HarmonyOS 列表中按应用名称进入详情（点击名称列，非包名列）。"""
+    """进入应用详情。新版走 APP ID 列表的「开发」，旧版仍点击名称列。"""
     name = (app_name or "").strip()
     bundle = (bundle_id or "").strip()
-    if not name:
+    if not name and not bundle:
         raise ValueError("appName 不能为空")
+
+    dismiss_developer_center_welcome(page, timeout_ms=800)
+    deadline = time.time() + 6
+    while time.time() < deadline and not _app_list_scopes(page):
+        page.wait_for_timeout(250)
+    if _is_new_app_id_list(page):
+        _open_app_from_app_id_list(page, name, bundle)
+        return
 
     try:
         tab = page.get_by_text("HarmonyOS", exact=True).first
@@ -154,12 +271,13 @@ def open_harmony_app_from_myapp_list(
 
     page.wait_for_timeout(300)
 
-    # 列表上方搜索框（Element Plus）
+    # 列表上方搜索框（Element Plus）。不要用页面上第一个 input，那可能是页头全局搜索。
     search_candidates = [
-        page.locator("input.el-input__inner").first,
         page.locator("input[placeholder*='应用']").first,
         page.locator("input[placeholder*='搜索']").first,
         page.locator("input[placeholder*='名称']").first,
+        page.locator(".el-table").locator("xpath=ancestor::*[1]").locator("input.el-input__inner").first,
+        page.locator("input.el-input__inner").first,
     ]
     for search in search_candidates:
         try:
@@ -167,31 +285,37 @@ def open_harmony_app_from_myapp_list(
                 box = search.first
                 box.click(timeout=2_000)
                 box.fill("", timeout=2_000)
-                box.fill(name, timeout=2_000)
+                box.fill(bundle or name, timeout=2_000)
                 box.press("Enter")
-                filtered = page.locator(".el-table__body-wrapper tbody tr").filter(has_text=name)
-                try:
-                    filtered.first.wait_for(state="visible", timeout=5_000)
-                except Exception:  # noqa: BLE001
-                    page.wait_for_timeout(400)
+                page.wait_for_timeout(400)
                 break
         except Exception:  # noqa: BLE001
             continue
 
-    row = page.locator(".el-table__body-wrapper tbody tr").filter(has_text=name)
+    row = page.locator(".el-table__body-wrapper tbody tr")
+    if name:
+        named = row.filter(has_text=name)
+        if named.count():
+            row = named
     if bundle:
         matched = row.filter(has_text=bundle)
         if matched.count():
             row = matched
 
-    row.first.wait_for(state="visible", timeout=15_000)
+    try:
+        row.first.wait_for(state="visible", timeout=12_000)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "应用列表里没有匹配行。当前已打开控制台，不是登录失效。"
+            f"查找名称「{name}」包名「{bundle or '未提供'}」。当前地址：{page.url}"
+        ) from exc
 
     # 名称在第一列，通常是蓝色可点击链接
     name_cell = row.first.locator("td").first
     click_candidates = [
-        name_cell.locator("a").filter(has_text=name),
-        name_cell.locator(".el-link").filter(has_text=name),
-        name_cell.get_by_text(name, exact=False),
+        name_cell.locator("a").filter(has_text=name) if name else name_cell.locator("a"),
+        name_cell.locator(".el-link"),
+        name_cell.get_by_text(name, exact=False) if name else name_cell,
         name_cell,
     ]
     last_error: Exception | None = None
@@ -208,7 +332,9 @@ def open_harmony_app_from_myapp_list(
     hint = f"应用名「{name}」"
     if bundle:
         hint += f"（包名 {bundle}）"
-    raise RuntimeError(f"HarmonyOS 列表中未能点击进入 {hint}：{last_error}")
+    raise RuntimeError(
+        f"列表里看到了行，但未能进入详情 {hint}：{last_error}。当前地址：{page.url}"
+    )
 
 
 def wait_for_app_detail_ready(page: Page, *, timeout_ms: int = 15_000) -> None:
@@ -566,8 +692,82 @@ def click_text_in_content_area(frame: Frame, text: str) -> None:
         raise RuntimeError(f"JS 兜底未能在 frame 内点击「{text}」")
 
 
+def _is_hdc_console_home(url: str) -> bool:
+    """新版 HarmonyOS 开发者中心首页，不是上架用的 AGC myApp。"""
+    blob = url or ""
+    return "hdc-console" in blob and "#/home" in blob
+
+
+def dismiss_developer_center_welcome(page: Page, *, timeout_ms: int = 2_000) -> bool:
+    """关闭「欢迎进入 HarmonyOS 开发者中心」浮层。
+
+    只点「稍后体验」（截图上的次按钮），不点蓝色「立即体验」。
+    浮层不在则立刻返回，避免拖慢没有这层的步骤。
+    """
+    click_js = """
+    () => {
+      const visible = (el) => {
+        if (!el) return false;
+        const s = window.getComputedStyle(el);
+        if (s.visibility === 'hidden' || s.display === 'none' || Number(s.opacity) === 0) {
+          return false;
+        }
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const textOf = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+      const nodes = Array.from(document.querySelectorAll('div, section, [role="dialog"]'));
+      const cards = nodes.filter((el) => {
+        if (!visible(el)) return false;
+        const text = textOf(el);
+        return text.includes('欢迎进入') && text.includes('稍后体验') && text.length < 1200;
+      });
+      cards.sort((a, b) => textOf(a).length - textOf(b).length);
+      const card = cards[0];
+      if (!card) return false;
+      const labels = ['稍后体验', '暂不体验', '不体验'];
+      const candidates = Array.from(card.querySelectorAll('button, a, [role="button"], div, span'));
+      for (const label of labels) {
+        const target = candidates.find((el) => visible(el) && textOf(el) === label);
+        if (!target) continue;
+        target.click();
+        return label;
+      }
+      return false;
+    }
+    """
+    deadline = time.time() + timeout_ms / 1000
+    while True:
+        scopes: list[Page | Frame] = [page]
+        try:
+            scopes.extend(list(page.frames))
+        except Exception:  # noqa: BLE001
+            pass
+        saw_welcome = False
+        for scope in scopes:
+            try:
+                clicked = scope.evaluate(click_js)
+            except Exception:  # noqa: BLE001
+                clicked = False
+            if clicked:
+                page.wait_for_timeout(400)
+                logger.info("已关闭 HarmonyOS 开发者中心欢迎浮层：%s", clicked)
+                return True
+            try:
+                if scope.get_by_text(re.compile(r"欢迎进入")).count():
+                    saw_welcome = True
+            except Exception:  # noqa: BLE001
+                pass
+        if not saw_welcome and not _is_hdc_console_home(page.url or ""):
+            return False
+        if time.time() >= deadline:
+            return False
+        page.wait_for_timeout(250)
+
+
 def dismiss_blocking_tips(page: Page) -> None:
-    """关闭「知道了 / 关闭」类阻塞弹窗。"""
+    """关闭欢迎浮层，以及「知道了 / 关闭」类阻塞弹窗。"""
+    dismiss_developer_center_welcome(page, timeout_ms=800)
     for name in ("知道了", "我知道了", "关闭"):
         try:
             btn = page.get_by_role("button", name=name)
@@ -694,6 +894,19 @@ def open_myapp_page(
             page.goto(AGC_MYAPP_URL, wait_until="domcontentloaded", timeout=timeout_ms)
             page.wait_for_timeout(500)
         ensure_agc_logged_in(page, context, refresh_storage=False)
+
+    # 改版后旧 myApp 有时会先落到 hdc-console 首页，并弹出「欢迎进入 HarmonyOS 开发者中心」。
+    # 先点「稍后体验」。若仍停在新首页，再打开一次配置的 myApp 地址。
+    dismiss_developer_center_welcome(page)
+    if _is_hdc_console_home(page.url or ""):
+        logger.warning(
+            "当前页是新开发者中心首页 %s，不是 myApp %s，关闭欢迎层后重新进入",
+            page.url,
+            AGC_MYAPP_URL,
+        )
+        page.goto(AGC_MYAPP_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+        page.wait_for_timeout(500)
+        dismiss_developer_center_welcome(page)
 
 
 @contextmanager
