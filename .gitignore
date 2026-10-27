@@ -1,5 +1,6 @@
 .venv/
 .env
+.env_*
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -8,3 +9,6 @@ __pycache__/
 .DS_Store
 downloads/
 *.png
+
+# 本地 Harmony 签名材料（p12/cer 等，勿提交）
+AppAutoBAT/
