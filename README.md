@@ -23,6 +23,15 @@
 - 浏览器自动化：`playwright install chromium`
 - 签名材料：默认使用仓库内 `AppAutoBAT/`（p12/cer，密码在 `.env`）
 
+
+
+
+https://github.com/user-attachments/assets/8424a148-a0ec-4db9-9a4c-7abc5f134649
+
+
+
+
+
 ## 快速开始
 
 ```bash
