@@ -48,9 +48,16 @@ def validate_llm_config() -> str | None:
     return None
 
 
+def get_llm_mode_label() -> str:
+    if is_api_provider():
+        return "DeepSeek API"
+    return "本地 Ollama"
+
+
 def get_llm_public_info() -> dict[str, Any]:
     info: dict[str, Any] = {
         "provider": LLM_PROVIDER,
+        "mode_label": get_llm_mode_label(),
         "model": get_active_model_name(),
         "tool_model": get_active_model_name(for_tool=True),
         "base_url": get_active_base_url(),

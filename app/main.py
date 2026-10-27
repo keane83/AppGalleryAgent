@@ -75,9 +75,14 @@ async def health():
             ollama_error = str(exc)
         llm_ok = ollama_ok
 
+    llm_payload = {
+        **llm_info,
+        "ready": llm_ok,
+    }
+
     return {
         "status": "ok" if llm_ok else "degraded",
-        "llm": llm_info,
+        "llm": llm_payload,
         "ollama": {
             "reachable": ollama_ok,
             "base_url": OLLAMA_BASE_URL,

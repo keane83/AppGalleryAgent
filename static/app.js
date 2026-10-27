@@ -240,13 +240,39 @@ function setStatus(online, text) {
   statusTextEl.textContent = text;
 }
 
+function llmModeLabel(provider) {
+  const p = String(provider || "ollama").toLowerCase();
+  if (p === "deepseek") return "DeepSeek API";
+  return "本地 Ollama";
+}
+
 async function checkHealth() {
   try {
     const res = await fetch("/api/health");
     const data = await res.json();
-    const ok = data.ollama?.reachable;
-    const model = data.agent?.model || "unknown";
-    setStatus(ok, ok ? `已连接 · ${model}` : `Ollama 不可用 · ${model}`);
+    const llm = data.llm || {};
+    const provider = llm.provider || data.agent?.provider || "ollama";
+    const modeLabel = llm.mode_label || llmModeLabel(provider);
+    const model = llm.model || data.agent?.model || "unknown";
+
+    let ok = Boolean(llm.ready);
+    if (llm.ready === undefined) {
+      ok =
+        provider === "deepseek"
+          ? Boolean(data.api?.reachable)
+          : Boolean(data.ollama?.reachable);
+    }
+
+    if (ok) {
+      setStatus(true, `${modeLabel} · ${model}`);
+    } else {
+      const err =
+        llm.config_error ||
+        (provider === "deepseek" ? data.api?.error : data.ollama?.error) ||
+        "";
+      const errHint = err ? ` · ${String(err).slice(0, 48)}` : "";
+      setStatus(false, `${modeLabel} 未就绪 · ${model}${errHint}`);
+    }
   } catch {
     setStatus(false, "服务不可用");
   }
